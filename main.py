@@ -1,7 +1,7 @@
 import os
 
 from dotenv import load_dotenv
-from langchain_core.messages import AIMessageChunk, ToolMessage
+from langchain_core.messages import AIMessage, ToolMessage
 from rich.console import Console
 from rich.markup import escape
 from rich.panel import Panel
@@ -15,6 +15,19 @@ console = Console()
 load_dotenv()
 
 DEBUG = os.getenv("DEBUG", "false").lower() == "true"
+
+
+def to_text(content: object) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(
+            item if isinstance(item, str)
+            else item.get("text", "") if isinstance(item, dict) and item.get("type") == "text"
+            else ""
+            for item in content
+        )
+    return ""
 
 
 def main():
@@ -36,7 +49,7 @@ def main():
     if category == "Back to main menu":
         return
 
-    in_llm_turn = False
+    had_error = False
     status: Status | None = None
 
     def set_status(text: str):
@@ -52,73 +65,71 @@ def main():
             status.stop()
             status = None
 
-    for mode, payload in career_graph.stream(
+    for updates in career_graph.stream(
         {"messages": []},
-        stream_mode=["messages", "updates"],
+        stream_mode="updates",
     ):
-        if mode == "updates":
-            updates = payload
-            if not updates:
-                continue
-            node = next(iter(updates))
-            node_state = updates[node]
-            messages = node_state.get("messages", [])
-            last_message = messages[-1] if messages else None
-
-            if node == "human_input_node":
-                clear_status()
-                set_status("Waiting for next step...")
-                continue
-
-            if node == "llm_node":
-                has_tool_calls = bool(
-                    getattr(last_message, "tool_calls", None)
-                )
-                if has_tool_calls:
-                    set_status("Waiting for next step...")
-                else:
-                    clear_status()
-                continue
-
-            if node == "tool_node":
-                if isinstance(last_message, ToolMessage) and "Error" in last_message.content:
-                    clear_status()
-                continue
-
-        if mode != "messages":
+        if not updates:
             continue
 
-        chunk, metadata = payload
-        node = metadata.get("langgraph_node", "")
+        node = next(iter(updates))
+        messages = updates[node].get("messages", [])
+        if not messages:
+            continue
+        last = messages[-1]
 
-        if node == "llm_node" and isinstance(chunk, AIMessageChunk):
-            if chunk.content:
-                clear_status()
-                if not in_llm_turn:
-                    in_llm_turn = True
-                    console.print(
-                        "\n[bold blue]Assistant:[/bold blue] ", end="")
-                console.print(chunk.content, end="", markup=False)
+        if node == "human_input_node":
+            set_status("Thinking...")
             continue
 
-        if in_llm_turn:
-            in_llm_turn = False
-            console.print()
-
-        if node == "tool_node" and isinstance(chunk, ToolMessage):
+        if node == "llm_node":
             clear_status()
-            content = escape(chunk.content)
-            if "Error" not in chunk.content:
-                console.print(f"\n[bold green]  {content}[/bold green]")
+
+            if not isinstance(last, AIMessage):
+                continue
+
+            text = to_text(last.content)
+
+            if text.startswith("LLM error:"):
+                had_error = True
+                console.print(f"\n[bold red]{escape(text)}[/bold red]")
+                continue
+
+            if text:
+                console.print("\n[bold blue]Assitant:[/bold blue] ", end="")
+                console.print(text, markup=False)
+
+            if getattr(last, "tool_calls", None):
+                set_status("Running tool...")
+            continue
+
+        if node == "tool_node":
+            clear_status()
+
+            if not isinstance(last, ToolMessage):
+                continue
+
+            content = escape(last.content)
+            if "Error" not in last.content:
+                console.print(f"\n[bold green]Tool:[/bold green] {content}")
+                set_status("Thinking...")
             else:
-                console.print(f"\n[bold red]  Error: {content}[/bold red]")
+                had_error = True
+                console.print(f"\n[bold red]Tool error:[/bold red] {content}")
+
             if DEBUG:
-                console.log(f"[DEBUG] tool raw: {chunk.content}")
+                console.log(f"[DEBUG] tool raw: {last.content}")
+            continue
 
     clear_status()
-    console.print(Rule(style="green"))
-    console.print("[bold green]  Saved successfully![/bold green]")
-    console.print(Rule(style="green"))
+    if had_error:
+        console.print(Rule(style="yellow"))
+        console.print("[bold yellow]  Finished with errors[/bold yellow]")
+        console.print(Rule(style="yellow"))
+    else:
+        console.print(Rule(style="green"))
+        console.print("[bold green]  Saved successfully![/bold green]")
+        console.print(Rule(style="green"))
 
 
 if __name__ == "__main__":

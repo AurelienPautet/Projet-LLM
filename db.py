@@ -1,7 +1,7 @@
 import os
 from typing import List, Optional
 from dotenv import load_dotenv
-from sqlmodel import SQLModel, Field, ARRAY, String, create_engine, Session, text
+from sqlmodel import SQLModel, Field, ARRAY, String, create_engine, text
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import Column
 
@@ -26,8 +26,12 @@ class ExperienceBase(SQLModel):
 class Experience(ExperienceBase, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     embedding: Optional[List[float]] = Field(
-        default=None, sa_column=Column(Vector(1536))
+        default=None, sa_column=Column(Vector(3072))
     )
+
+
+class ExperienceResult(ExperienceBase):
+    id: int
 
 
 DATABASE_URL = os.getenv(
@@ -37,6 +41,15 @@ engine = create_engine(DATABASE_URL)
 
 def create_db_and_tables():
     with engine.connect() as conn:
+        conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+        conn.commit()
+    SQLModel.metadata.create_all(engine)
+
+
+def reset_db_and_tables():
+    with engine.connect() as conn:
+        conn.execute(text("DROP SCHEMA IF EXISTS public CASCADE"))
+        conn.execute(text("CREATE SCHEMA public"))
         conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
         conn.commit()
     SQLModel.metadata.create_all(engine)
