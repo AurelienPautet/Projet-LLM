@@ -1,17 +1,4 @@
 services:
-  app:
-    build:
-      context: .
-      dockerfile: .devcontainer/Dockerfile
-    volumes:
-      - .:/workspace
-    depends_on:
-      db:
-        condition: service_healthy
-    env_file:
-      - .env
-    command: sleep infinity
-
   db:
     image: pgvector/pgvector:pg16
     restart: unless-stopped
