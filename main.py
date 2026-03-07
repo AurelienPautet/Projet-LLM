@@ -3,7 +3,7 @@ import os
 from dotenv import load_dotenv
 from langchain_core.messages import AIMessage, ToolMessage
 from rich.console import Console
-from rich.markup import escape
+from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.rule import Rule
 from rich.status import Status
@@ -92,33 +92,41 @@ def main():
 
             if text.startswith("LLM error:"):
                 had_error = True
-                console.print(f"\n[bold red]{escape(text)}[/bold red]")
+                console.print(Markdown(f"**Error:** {text}"), style="red")
                 continue
 
             if text:
-                console.print("\n[bold blue]Assitant:[/bold blue] ", end="")
-                console.print(text, markup=False)
+                console.print("\n[bold blue]Assistant:[/bold blue]")
+                console.print(Markdown(text))
 
             if getattr(last, "tool_calls", None):
+                for tc in last.tool_calls:
+                    args = ", ".join(f"{k}={v!r}" for k,
+                                     v in tc.get("args", {}).items())
+                    console.print(
+                        f"\n[bold green]Tool:[/bold green] {tc['name']}({args})")
                 set_status("Running tool...")
             continue
 
         if node == "tool_node":
             clear_status()
 
-            if not isinstance(last, ToolMessage):
-                continue
+            any_success = False
+            for msg in messages:
+                if not isinstance(msg, ToolMessage):
+                    continue
+                if "Error" in msg.content:
+                    had_error = True
+                    console.print(
+                        Markdown(f"**Tool error:** {msg.content}"), style="red")
+                else:
+                    any_success = True
+                if DEBUG:
+                    console.print(
+                        f"[bold orange_red1]Tool output:[/bold orange_red1] {msg.content}")
 
-            content = escape(last.content)
-            if "Error" not in last.content:
-                console.print(f"\n[bold green]Tool:[/bold green] {content}")
+            if any_success:
                 set_status("Thinking...")
-            else:
-                had_error = True
-                console.print(f"\n[bold red]Tool error:[/bold red] {content}")
-
-            if DEBUG:
-                console.log(f"[DEBUG] tool raw: {last.content}")
             continue
 
     clear_status()

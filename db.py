@@ -21,6 +21,8 @@ class ExperienceBase(SQLModel):
         description="the end date of the experience")
     company_or_institution: Optional[str] = Field(
         description="the company or institution where the experience was gained")
+    location: Optional[str] = Field(
+        description="the location of the experience, e.g., 'Paris, France'")
 
 
 class Experience(ExperienceBase, table=True):

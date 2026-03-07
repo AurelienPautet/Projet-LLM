@@ -18,6 +18,7 @@ def experience_to_embedding_text(experience: ExperienceBase) -> str:
         f"Start date: {experience.start_date or ''}",
         f"End date: {experience.end_date or ''}",
         f"Organization: {experience.company_or_institution or ''}",
+        f"Location: {experience.location or ''}",
     ])
 
 
