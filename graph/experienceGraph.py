@@ -7,13 +7,14 @@ from langgraph.prebuilt import ToolNode
 from langgraph.types import Command
 from rich.prompt import Prompt
 
-from tool.tools import addExperience, searchExperiences, editExperience
+from tool.tools import addExperience, searchExperiences, editExperience, deleteExperience, getAllExperiences, getExperienceCount
 from graph.baseGraph import BaseState
 from llmUtils import buildModel, invokeModelWithRetries
 
 load_dotenv()
 
-TOOLS = [addExperience, searchExperiences, editExperience]
+TOOLS = [addExperience, searchExperiences,
+         editExperience, deleteExperience, getAllExperiences, getExperienceCount]
 
 
 def processExperienceNode(state: BaseState) -> Command:

@@ -7,27 +7,15 @@ from sqlalchemy import cast
 
 from db.db import engine, Experience, ExperienceBase, ExperienceResult
 from graph.embedding import createEmbeddingFromText
-
-
-def experienceToEmbeddingText(experience: ExperienceBase) -> str:
-    technos = ", ".join(experience.technos or [])
-    return "\n".join([
-        f"Title: {experience.title}",
-        f"Description: {experience.description}",
-        f"Technologies: {technos}",
-        f"Start date: {experience.start_date or ''}",
-        f"End date: {experience.end_date or ''}",
-        f"Organization: {experience.company_or_institution or ''}",
-        f"Location: {experience.location or ''}",
-    ])
+from llmUtils import schemaToEmbeddingText
 
 
 @tool
 def addExperience(experience: ExperienceBase) -> str:
-    """Add a professional experience to the CV database."""
+    """Add a professional experience to the CV database. Best practice: check if the experience already exists using searchExperiences before adding to avoid duplicates."""
     try:
         embedding = createEmbeddingFromText(
-            experienceToEmbeddingText(experience)
+            schemaToEmbeddingText(experience)
         )
 
         with Session(engine) as session:
@@ -83,7 +71,7 @@ def editExperience(id: int, experience: ExperienceBase) -> str:
                 setattr(dbExperience, field, value)
 
             dbExperience.embedding = createEmbeddingFromText(
-                experienceToEmbeddingText(experience)
+                schemaToEmbeddingText(experience)
             )
 
             session.add(dbExperience)
@@ -93,3 +81,53 @@ def editExperience(id: int, experience: ExperienceBase) -> str:
         return f"Experience updated: {dbExperience.title} at {dbExperience.company_or_institution or 'N/A'}"
     except Exception as exc:
         return f"Error: editExperience failed: {exc}"
+
+
+@tool
+def getAllExperiences() -> str:
+    """Get all existing experiences from the CV database. WARNING: Use sparingly as this retrieves all records. Prefer searchExperiences for targeted queries."""
+    try:
+        with Session(engine) as session:
+            results = session.exec(select(Experience)).all()
+
+        if not results:
+            return "No experiences found."
+
+        out: List[str] = []
+        for exp in results:
+            technos = ", ".join(exp.technos or [])
+            out.append(
+                f"[id={exp.id}] {exp.title} at {exp.company_or_institution or 'N/A'} "
+                f"({exp.start_date or '?'} - {exp.end_date or '?'}) | {technos}"
+            )
+        return "\n".join(out)
+    except Exception as exc:
+        return f"Error: getAllExperiences failed: {exc}"
+
+
+@tool
+def getExperienceCount() -> str:
+    """Get the total number of experiences in the CV database."""
+    try:
+        with Session(engine) as session:
+            count = len(session.exec(select(Experience)).all())
+        return f"Total experiences: {count}"
+    except Exception as exc:
+        return f"Error: getExperienceCount failed: {exc}"
+
+
+@tool
+def deleteExperience(id: int) -> str:
+    """Delete an experience by its id."""
+    try:
+        with Session(engine) as session:
+            dbExperience = session.get(Experience, id)
+            if dbExperience is None:
+                return f"Error: no experience found with id={id}"
+
+            session.delete(dbExperience)
+            session.commit()
+
+        return f"Experience with id={id} deleted successfully"
+    except Exception as exc:
+        return f"Error: deleteExperience failed: {exc}"

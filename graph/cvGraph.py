@@ -6,13 +6,13 @@ from langgraph.graph import StateGraph, START, END
 from langgraph.prebuilt import ToolNode
 from langgraph.types import Command
 
-from tool.tools import addExperience
+from tool.tools import addExperience, searchExperiences, deleteExperience
 from graph.baseGraph import BaseState
 from llmUtils import buildModel, invokeModelWithRetries
 
 load_dotenv()
 
-TOOLS = [addExperience]
+TOOLS = [addExperience, searchExperiences, deleteExperience]
 
 
 class CVState(BaseState):

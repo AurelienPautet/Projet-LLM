@@ -1,5 +1,6 @@
 import os
 from typing import List, Optional
+from enum import Enum
 from dotenv import load_dotenv
 from sqlmodel import SQLModel, Field, ARRAY, String, create_engine, text
 from pgvector.sqlalchemy import Vector
@@ -8,9 +9,17 @@ from sqlalchemy import Column
 load_dotenv()
 
 
+class ExperienceType(str, Enum):
+    PROFESSIONAL = "professional"
+    EDUCATIONAL = "educational"
+    PROJECT = "project"
+
+
 class ExperienceBase(SQLModel):
     title: str = Field(
         description="the title of the experience, e.g., 'Software Engineer Intern'")
+    kind: Optional[ExperienceType] = Field(
+        description="the kind of experience, e.g., 'professional', 'educational', 'project'")
     description: str = Field(
         description="a detailed description of the experience, including responsibilities and achievements")
     technos: Optional[List[str]] = Field(sa_column=Column(ARRAY(

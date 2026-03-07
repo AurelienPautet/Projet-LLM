@@ -5,6 +5,7 @@ from dotenv import load_dotenv
 from langchain_core.messages import AIMessage
 from langchain_openai import ChatOpenAI
 from rich.console import Console
+from pydantic import BaseModel
 
 load_dotenv()
 
@@ -12,6 +13,18 @@ LLM_MIN_TOKENS = int(os.getenv("AI_MIN_TOKENS", "2"))
 LLM_MAX_RETRIES = int(os.getenv("AI_MIN_TOKENS_RETRIES", "10"))
 LLM_RETRY_BASE_DELAY = float(os.getenv("AI_RETRY_BASE_DELAY", "1.0"))
 console = Console()
+
+
+def schemaToEmbeddingText(obj: BaseModel) -> str:
+    lines = []
+    for fieldName, fieldValue in obj.model_dump().items():
+        if fieldValue is None:
+            continue
+        if isinstance(fieldValue, list):
+            fieldValue = ", ".join(str(item) for item in fieldValue)
+        label = fieldName.replace("_", " ").title()
+        lines.append(f"{label}: {fieldValue}")
+    return "\n".join(lines)
 
 
 def buildModel(tools: list) -> ChatOpenAI:
