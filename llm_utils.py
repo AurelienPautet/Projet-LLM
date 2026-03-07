@@ -14,7 +14,7 @@ LLM_RETRY_BASE_DELAY = float(os.getenv("AI_RETRY_BASE_DELAY", "1.0"))
 console = Console()
 
 
-def build_model(tools: list) -> ChatOpenAI:
+def buildModel(tools: list) -> ChatOpenAI:
     return ChatOpenAI(
         model=os.getenv("AI_MODEL"),
         base_url=os.getenv("AI_ENDPOINT"),
@@ -24,9 +24,9 @@ def build_model(tools: list) -> ChatOpenAI:
     ).bind_tools(tools)
 
 
-def response_is_empty(response: AIMessage) -> bool:
-    has_tool_calls = bool(getattr(response, "tool_calls", None))
-    if has_tool_calls:
+def responseIsEmpty(response: AIMessage) -> bool:
+    hasToolCalls = bool(getattr(response, "tool_calls", None))
+    if hasToolCalls:
         return False
     content = response.content
     if isinstance(content, str):
@@ -34,7 +34,7 @@ def response_is_empty(response: AIMessage) -> bool:
     return False
 
 
-def invoke_model_with_retries(model: ChatOpenAI, messages: list) -> AIMessage:
+def invokeModelWithRetries(model: ChatOpenAI, messages: list) -> AIMessage:
     for attempt in range(LLM_MAX_RETRIES):
         if attempt > 0:
             delay = LLM_RETRY_BASE_DELAY * (2 ** (attempt - 1))
@@ -43,6 +43,6 @@ def invoke_model_with_retries(model: ChatOpenAI, messages: list) -> AIMessage:
             )
             time.sleep(delay)
         response = model.invoke(messages)
-        if not response_is_empty(response):
+        if not responseIsEmpty(response):
             return response
     return response

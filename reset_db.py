@@ -1,6 +1,6 @@
-from db import reset_db_and_tables
+from db import resetDbAndTables
 
 
 if __name__ == "__main__":
-    reset_db_and_tables()
+    resetDbAndTables()
     print("Database reset completed.")

@@ -1,82 +1,76 @@
 import os
-from typing import Annotated
 
 from dotenv import load_dotenv
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, ToolMessage, HumanMessage
 from langgraph.graph import StateGraph, START
-from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
+from langgraph.types import Command
 from rich.prompt import Prompt
-from typing_extensions import TypedDict
 
-from tools import add_experience, search_experiences, edit_experience
-from llm_utils import build_model, invoke_model_with_retries
+from tools import addExperience, searchExperiences, editExperience
+from base_graph import BaseState
+from llm_utils import buildModel, invokeModelWithRetries
 
 load_dotenv()
 
-TOOLS = [add_experience, search_experiences, edit_experience]
+TOOLS = [addExperience, searchExperiences, editExperience]
 
 
-class AgentState(TypedDict):
-    messages: Annotated[list[BaseMessage], add_messages]
-
-
-def human_input_node(state: AgentState) -> dict:
+def humanInputNode(state: BaseState) -> Command:
     question = Prompt.ask("\n[bold magenta]You[/bold magenta]")
-    return {"messages": [HumanMessage(content=question)]}
+    return Command(
+        goto="llmNode",
+        update={
+            "messages": [HumanMessage(content=question)],
+            "status": "Thinking..."
+        }
+    )
 
 
-def llm_node(state: AgentState) -> dict:
+def llmNode(state: BaseState) -> dict:
     try:
-        model = build_model(TOOLS)
-        response = invoke_model_with_retries(model, state["messages"])
+        model = buildModel(TOOLS)
+        response = invokeModelWithRetries(model, state["messages"])
         return {"messages": [response]}
     except Exception as exc:
         return {"messages": [AIMessage(content=f"LLM error: {exc}")]}
 
 
-tool_node = ToolNode(TOOLS)
-
-
-def after_llm(state: AgentState) -> str:
+def afterLlmNode(state: BaseState) -> Command:
     last = state["messages"][-1]
     if isinstance(last, AIMessage) and isinstance(last.content, str) and last.content.startswith("LLM error:"):
-        return "human_input_node"
-    if hasattr(last, "tool_calls") and last.tool_calls:
-        return "tool_node"
-    return "human_input_node"
+        return Command(goto="humanInputNode", update={"status": ""})
+
+    if getattr(last, "tool_calls", None):
+        return Command(goto="toolNode", update={"status": "Running tools..."})
+
+    return Command(goto="humanInputNode", update={"status": ""})
 
 
-def after_tool(state: AgentState) -> str:
+def afterToolNode(state: BaseState) -> Command:
     last = state["messages"][-1]
+
     if isinstance(last, ToolMessage) and "Error" not in last.content:
-        return "llm_node"
-    return "human_input_node"
+        return Command(goto="llmNode", update={"status": "Analysing tool output..."})
+
+    return Command(goto="llmNode", update={"status": "Handling error..."})
 
 
-def build_graph() -> StateGraph:
-    graph = StateGraph(AgentState)
+def buildGraph() -> StateGraph:
+    graph = StateGraph(BaseState)
 
-    graph.add_node("human_input_node", human_input_node)
-    graph.add_node("llm_node", llm_node)
-    graph.add_node("tool_node", tool_node)
+    graph.add_node("humanInputNode", humanInputNode)
+    graph.add_node("llmNode", llmNode)
+    graph.add_node("toolNode", ToolNode(TOOLS))
 
-    graph.add_edge(START, "human_input_node")
-    graph.add_edge("human_input_node", "llm_node")
+    graph.add_node("afterLlmNode", afterLlmNode)
+    graph.add_node("afterToolNode", afterToolNode)
 
-    graph.add_conditional_edges(
-        "llm_node",
-        after_llm,
-        {"tool_node": "tool_node", "human_input_node": "human_input_node"},
-    )
-
-    graph.add_conditional_edges(
-        "tool_node",
-        after_tool,
-        {"human_input_node": "human_input_node", "llm_node": "llm_node"},
-    )
+    graph.add_edge(START, "humanInputNode")
+    graph.add_edge("llmNode", "afterLlmNode")
+    graph.add_edge("toolNode", "afterToolNode")
 
     return graph.compile()
 
 
-career_graph = build_graph()
+career_graph = buildGraph()

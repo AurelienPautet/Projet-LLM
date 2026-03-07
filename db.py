@@ -41,14 +41,14 @@ DATABASE_URL = os.getenv(
 engine = create_engine(DATABASE_URL)
 
 
-def create_db_and_tables():
+def createDbAndTables():
     with engine.connect() as conn:
         conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
         conn.commit()
     SQLModel.metadata.create_all(engine)
 
 
-def reset_db_and_tables():
+def resetDbAndTables():
     with engine.connect() as conn:
         conn.execute(text("DROP SCHEMA IF EXISTS public CASCADE"))
         conn.execute(text("CREATE SCHEMA public"))
@@ -58,4 +58,4 @@ def reset_db_and_tables():
 
 
 if __name__ == "__main__":
-    create_db_and_tables()
+    createDbAndTables()
