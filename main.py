@@ -9,7 +9,8 @@ from rich.rule import Rule
 from rich.status import Status
 import questionary
 
-from graph import career_graph
+from experience_graph import career_graph
+from cv_loader import load_cv_flow
 
 console = Console()
 load_dotenv()
@@ -30,27 +31,9 @@ def to_text(content: object) -> str:
     return ""
 
 
-def main():
-    console.print(Rule(style="blue"))
-    console.print(Panel("[bold blue]Career Copilot[/bold blue]",
-                  border_style="blue", padding=(0, 4)))
-    console.print(Rule(style="blue"))
-
-    category = questionary.select(
-        "What do you want to add?",
-        choices=[
-            "Professional experience",
-            "Academic / personal project",
-            "Education",
-            "Back to main menu",
-        ]
-    ).ask()
-
-    if category == "Back to main menu":
-        return
-
+def run_experience_graph():
     had_error = False
-    status: Status | None = None
+    status = None
 
     def set_status(text: str):
         nonlocal status
@@ -65,10 +48,7 @@ def main():
             status.stop()
             status = None
 
-    for updates in career_graph.stream(
-        {"messages": []},
-        stream_mode="updates",
-    ):
+    for updates in career_graph.stream({"messages": []}, stream_mode="updates"):
         if not updates:
             continue
 
@@ -138,6 +118,36 @@ def main():
         console.print(Rule(style="green"))
         console.print("[bold green]  Saved successfully![/bold green]")
         console.print(Rule(style="green"))
+
+
+def main():
+    console.print(Rule(style="blue"))
+    console.print(Panel("[bold blue]Career Copilot[/bold blue]",
+                  border_style="blue", padding=(0, 4)))
+    console.print(Rule(style="blue"))
+
+    while True:
+        category = questionary.select(
+            "What do you want to do?",
+            choices=[
+                "Add/modify a professional experience manually",
+                "Load experiences from a CV file",
+                "Create a cv for a specific job offer (not implemented yet)",
+                "Quit",
+            ]
+        ).ask()
+
+        if category == "Quit" or category is None:
+            console.print("[bold blue]Goodbye![/bold blue]")
+            break
+
+        if category == "Load experiences from a CV file":
+            load_cv_flow()
+        elif category == "Add/modify a professional experience manually":
+            run_experience_graph()
+        elif category == "Create a cv for a specific job offer (not implemented yet)":
+            console.print(
+                "[yellow]This feature is not implemented yet.[/yellow]")
 
 
 if __name__ == "__main__":
