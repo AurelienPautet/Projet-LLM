@@ -3,9 +3,9 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.rule import Rule
 
-from experience_graph import career_graph
-from cv_loader import loadCvFlow
-from base_graph import runGraph
+from graph.experienceGraph import career_graph
+from cvLoader import loadCvFlow
+from graph.baseGraph import runGraph
 
 console = Console()
 

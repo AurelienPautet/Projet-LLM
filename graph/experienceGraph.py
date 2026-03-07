@@ -1,19 +1,32 @@
 import os
 
 from dotenv import load_dotenv
-from langchain_core.messages import AIMessage, ToolMessage, HumanMessage
+from langchain_core.messages import AIMessage, ToolMessage, HumanMessage, SystemMessage
 from langgraph.graph import StateGraph, START
 from langgraph.prebuilt import ToolNode
 from langgraph.types import Command
 from rich.prompt import Prompt
 
-from tools import addExperience, searchExperiences, editExperience
-from base_graph import BaseState
-from llm_utils import buildModel, invokeModelWithRetries
+from tool.tools import addExperience, searchExperiences, editExperience
+from graph.baseGraph import BaseState
+from llmUtils import buildModel, invokeModelWithRetries
 
 load_dotenv()
 
 TOOLS = [addExperience, searchExperiences, editExperience]
+
+
+def processExperienceNode(state: BaseState) -> Command:
+    sysPrompt = SystemMessage(
+        content="You are an expert at collecting and organizing professional experiences. Your goal is to help the user add a new professional experience to their database. Gather all necessary details (title, description, start and end dates, company, location, technologies used) using the addExperience tool. Ask clarifying questions if needed."
+    )
+    return Command(
+        goto="humanInputNode",
+        update={
+            "messages": [sysPrompt],
+            "status": ""
+        }
+    )
 
 
 def humanInputNode(state: BaseState) -> Command:
@@ -59,6 +72,7 @@ def afterToolNode(state: BaseState) -> Command:
 def buildGraph() -> StateGraph:
     graph = StateGraph(BaseState)
 
+    graph.add_node("processExperienceNode", processExperienceNode)
     graph.add_node("humanInputNode", humanInputNode)
     graph.add_node("llmNode", llmNode)
     graph.add_node("toolNode", ToolNode(TOOLS))
@@ -66,7 +80,7 @@ def buildGraph() -> StateGraph:
     graph.add_node("afterLlmNode", afterLlmNode)
     graph.add_node("afterToolNode", afterToolNode)
 
-    graph.add_edge(START, "humanInputNode")
+    graph.add_edge(START, "processExperienceNode")
     graph.add_edge("llmNode", "afterLlmNode")
     graph.add_edge("toolNode", "afterToolNode")
 

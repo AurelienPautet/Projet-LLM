@@ -5,8 +5,8 @@ from sqlmodel import Session, select
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import cast
 
-from db import engine, Experience, ExperienceBase, ExperienceResult
-from embedding import createEmbeddingFromText
+from db.db import engine, Experience, ExperienceBase, ExperienceResult
+from graph.embedding import createEmbeddingFromText
 
 
 def experienceToEmbeddingText(experience: ExperienceBase) -> str:

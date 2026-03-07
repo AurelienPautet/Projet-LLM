@@ -1,6 +1,6 @@
 import questionary
-from cv_graph import cv_parser_graph
-from base_graph import runGraph
+from graph.cvGraph import cv_parser_graph
+from graph.baseGraph import runGraph
 
 
 def loadCvFlow():
