@@ -7,19 +7,19 @@ from langgraph.prebuilt import ToolNode
 from langgraph.types import Command
 from rich.prompt import Prompt
 
-from tool.tools import addExperience, searchExperiences, editExperience, deleteExperience, getAllExperiences, getExperienceCount
+from tool.tools import addExperience, searchExperiences, editExperience, deleteExperience, getAllExperiences, getExperienceCount, loadCvFromFile
 from graph.baseGraph import BaseState
 from llmUtils import buildModel, invokeModelWithRetries
 
 load_dotenv()
 
 TOOLS = [addExperience, searchExperiences,
-         editExperience, deleteExperience, getAllExperiences, getExperienceCount]
+         editExperience, deleteExperience, getAllExperiences, getExperienceCount, loadCvFromFile]
 
 
 def processExperienceNode(state: BaseState) -> Command:
     sysPrompt = SystemMessage(
-        content="You are an expert at collecting and organizing professional experiences. Your goal is to help the user add a new professional experience to their database. Gather all necessary details (title, description, start and end dates, company, location, technologies used) using the addExperience tool. Ask clarifying questions if needed."
+        content="You are an expert at collecting and organizing professional experiences. Your goal is to help the user add or modify professional experiences in their database. You can add experiences manually by gathering details from the user (title, description, start and end dates, company, location, technologies used), or load them from a CV file using the loadCvFromFile tool if the user provides a file path. Ask clarifying questions if needed."
     )
     return Command(
         goto="humanInputNode",

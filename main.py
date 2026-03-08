@@ -4,7 +4,6 @@ from rich.panel import Panel
 from rich.rule import Rule
 
 from graph.experienceGraph import career_graph
-from cvLoader import loadCvFlow
 from graph.baseGraph import runGraph
 
 console = Console()
@@ -20,8 +19,7 @@ def main():
         category = questionary.select(
             "What do you want to do?",
             choices=[
-                "Add/modify a professional experience manually",
-                "Load experiences from a CV file",
+                "Add/modify a professional experience",
                 "Create a cv for a specific job offer (not implemented yet)",
                 "Quit",
             ]
@@ -31,9 +29,7 @@ def main():
             console.print("[bold blue]Goodbye![/bold blue]")
             break
 
-        if category == "Load experiences from a CV file":
-            loadCvFlow()
-        elif category == "Add/modify a professional experience manually":
+        if category == "Add/modify a professional experience":
             runGraph(career_graph, {"messages": [], "status": ""})
         elif category == "Create a cv for a specific job offer (not implemented yet)":
             console.print(

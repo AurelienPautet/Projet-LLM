@@ -1,4 +1,5 @@
 import os
+from datetime import date
 from typing import List, Optional
 from enum import Enum
 from dotenv import load_dotenv
@@ -24,9 +25,9 @@ class ExperienceBase(SQLModel):
         description="a detailed description of the experience, including responsibilities and achievements")
     technos: Optional[List[str]] = Field(sa_column=Column(ARRAY(
         String)), description="a list of technologies used during the experience, e.g., ['Python', 'Django', 'PostgreSQL']")
-    start_date: Optional[str] = Field(
+    start_date: Optional[date] = Field(
         description="the start date of the experience")
-    end_date: Optional[str] = Field(
+    end_date: Optional[date] = Field(
         description="the end date of the experience")
     company_or_institution: Optional[str] = Field(
         description="the company or institution where the experience was gained")

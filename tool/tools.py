@@ -1,5 +1,7 @@
+import os
 from typing import List
 
+import fitz
 from langchain_core.tools import tool
 from sqlmodel import Session, select
 from pgvector.sqlalchemy import Vector
@@ -51,7 +53,7 @@ def searchExperiences(query: str, limit: int = 5) -> str:
             technos = ", ".join(exp.technos or [])
             out.append(
                 f"[id={exp.id}] {exp.title} at {exp.company_or_institution or 'N/A'} "
-                f"({exp.start_date or '?'} - {exp.end_date or '?'}) | {technos}"
+                f"({str(exp.start_date) if exp.start_date else '?'} - {str(exp.end_date) if exp.end_date else '?'}) | {technos}"
             )
         return "\n".join(out)
     except Exception as exc:
@@ -98,7 +100,7 @@ def getAllExperiences() -> str:
             technos = ", ".join(exp.technos or [])
             out.append(
                 f"[id={exp.id}] {exp.title} at {exp.company_or_institution or 'N/A'} "
-                f"({exp.start_date or '?'} - {exp.end_date or '?'}) | {technos}"
+                f"({str(exp.start_date) if exp.start_date else '?'} - {str(exp.end_date) if exp.end_date else '?'}) | {technos}"
             )
         return "\n".join(out)
     except Exception as exc:
@@ -131,3 +133,29 @@ def deleteExperience(id: int) -> str:
         return f"Experience with id={id} deleted successfully"
     except Exception as exc:
         return f"Error: deleteExperience failed: {exc}"
+
+
+@tool
+def loadCvFromFile(filepath: str) -> str:
+    """Read a CV file (PDF, TXT, or MD) and return its text content so you can extract and add experiences from it."""
+    filepath = filepath.strip().strip("'\"")
+    if not os.path.exists(filepath):
+        return f"Error: file not found at path: {filepath}"
+    ext = filepath.lower().split('.')[-1]
+    if ext == 'pdf':
+        try:
+            doc = fitz.open(filepath)
+            text = ""
+            for page in doc:
+                text += page.get_text() + "\n"
+            return text
+        except Exception as exc:
+            return f"Error reading PDF: {exc}"
+    elif ext in ['txt', 'md']:
+        try:
+            with open(filepath, 'r', encoding='utf-8') as f:
+                return f.read()
+        except Exception as exc:
+            return f"Error reading file: {exc}"
+    else:
+        return "Error: unsupported file format. Please provide a PDF, TXT, or MD file."
