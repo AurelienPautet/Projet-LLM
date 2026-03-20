@@ -9,7 +9,7 @@ from rich.prompt import Prompt
 
 from tool.tools import addExperience, searchExperiences, editExperience, deleteExperience, getAllExperiences, getExperienceCount, loadCvFromFile
 from graph.baseGraph import BaseState
-from llmUtils import buildModel, invokeModelWithRetries
+from llmUtils import buildModel, invokeAgentWithRetries
 
 load_dotenv()
 
@@ -17,23 +17,10 @@ TOOLS = [addExperience, searchExperiences,
          editExperience, deleteExperience, getAllExperiences, getExperienceCount, loadCvFromFile]
 
 
-def processExperienceNode(state: BaseState) -> Command:
-    sysPrompt = SystemMessage(
-        content="You are an expert at collecting and organizing professional experiences. Your goal is to help the user add or modify professional experiences in their database. You can add experiences manually by gathering details from the user (title, description, start and end dates, company, location, technologies used), or load them from a CV file using the loadCvFromFile tool if the user provides a file path. Ask clarifying questions if needed."
-    )
-    return Command(
-        goto="humanInputNode",
-        update={
-            "messages": [sysPrompt],
-            "status": ""
-        }
-    )
-
-
 def humanInputNode(state: BaseState) -> Command:
     question = Prompt.ask("\n[bold magenta]You[/bold magenta]")
     return Command(
-        goto="llmNode",
+        goto="agentNodeExperience_manager",
         update={
             "messages": [HumanMessage(content=question)],
             "status": "Thinking..."
@@ -41,19 +28,21 @@ def humanInputNode(state: BaseState) -> Command:
     )
 
 
-def llmNode(state: BaseState) -> dict:
+def agentNodeExperience_manager(state: BaseState) -> dict:
     try:
         model = buildModel(TOOLS)
-        response = invokeModelWithRetries(model, state["messages"])
+        systemPrompt = "You are an expert at collecting and organizing professional experiences. Your goal is to help the user add or modify professional experiences in their database. You can add experiences manually by gathering details from the user (title, description, start and end dates, company, location, technologies used), or load them from a CV file using the loadCvFromFile tool if the user provides a file path. Ask clarifying questions if needed."
+        response = invokeAgentWithRetries(
+            model, systemPrompt, state["messages"])
         return {"messages": [response]}
     except Exception as exc:
         return {"messages": [AIMessage(content=f"LLM error: {exc}")]}
 
 
-def afterLlmNode(state: BaseState) -> Command:
+def afteragentNodeExperience_manager(state: BaseState) -> Command:
     last = state["messages"][-1]
     if isinstance(last, AIMessage) and isinstance(last.content, str) and last.content.startswith("LLM error:"):
-        return Command(goto="humanInputNode", update={"status": ""})
+        return Command(goto="agentNodeExperience_manager", update={"status": ""})
 
     if getattr(last, "tool_calls", None):
         return Command(goto="toolNode", update={"status": "Running tools..."})
@@ -65,24 +54,25 @@ def afterToolNode(state: BaseState) -> Command:
     last = state["messages"][-1]
 
     if isinstance(last, ToolMessage) and "Error" not in last.content:
-        return Command(goto="llmNode", update={"status": "Analysing tool output..."})
+        return Command(goto="agentNodeExperience_manager", update={"status": "Analysing tool output..."})
 
-    return Command(goto="llmNode", update={"status": "Handling error..."})
+    return Command(goto="agentNodeExperience_manager", update={"status": "Handling error..."})
 
 
 def buildGraph() -> StateGraph:
     graph = StateGraph(BaseState)
 
-    graph.add_node("processExperienceNode", processExperienceNode)
     graph.add_node("humanInputNode", humanInputNode)
-    graph.add_node("llmNode", llmNode)
+    graph.add_node("agentNodeExperience_manager", agentNodeExperience_manager)
     graph.add_node("toolNode", ToolNode(TOOLS))
 
-    graph.add_node("afterLlmNode", afterLlmNode)
+    graph.add_node("afteragentNodeExperience_manager",
+                   afteragentNodeExperience_manager)
     graph.add_node("afterToolNode", afterToolNode)
 
-    graph.add_edge(START, "processExperienceNode")
-    graph.add_edge("llmNode", "afterLlmNode")
+    graph.add_edge(START, "humanInputNode")
+    graph.add_edge("agentNodeExperience_manager",
+                   "afteragentNodeExperience_manager")
     graph.add_edge("toolNode", "afterToolNode")
 
     return graph.compile()

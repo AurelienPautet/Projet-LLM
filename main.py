@@ -4,7 +4,9 @@ from rich.panel import Panel
 from rich.rule import Rule
 
 from graph.experienceGraph import career_graph
+from graph.cvGraph import cv_graph
 from graph.baseGraph import runGraph
+
 
 console = Console()
 
@@ -32,8 +34,7 @@ def main():
         if category == "Add/modify a professional experience":
             runGraph(career_graph, {"messages": [], "status": ""})
         elif category == "Create a cv for a specific job offer (not implemented yet)":
-            console.print(
-                "[yellow]This feature is not implemented yet.[/yellow]")
+            runGraph(cv_graph, {"messages": [], "status": ""})
 
 
 if __name__ == "__main__":

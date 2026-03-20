@@ -2,11 +2,12 @@ from typing import Annotated, Any
 
 from langchain_core.messages import AIMessage, ToolMessage, BaseMessage
 from langgraph.graph.message import add_messages
-from typing_extensions import TypedDict
+from langgraph.graph import MessagesState
+from pydantic import BaseModel
+from IPython.display import Image, display
 
 
-class BaseState(TypedDict):
-    messages: Annotated[list[BaseMessage], add_messages]
+class BaseState(MessagesState):
     status: str
 
 
@@ -70,25 +71,31 @@ def runGraph(graph, initial_state: dict):
             continue
         last = messages[-1]
 
-        if nodeName == "llmNode":
-            if isinstance(last, AIMessage):
-                text = toText(last.content)
-                if text.startswith("LLM error:"):
-                    hadError = True
-                    clearStatus()
-                    console.print(Markdown(f"**Error:** {text}"), style="red")
-                else:
+        if "agentNode" in nodeName:
+            text = toText(last.content)
+            if text.startswith("LLM error:"):
+                hadError = True
+                clearStatus()
+                console.print(Markdown(f"**Error:** {text}"), style="red")
+            else:
+                agentName = nodeName.replace("agentNode", "").replace("_", " ")
+                if isinstance(last, BaseModel) and not isinstance(last, (AIMessage, ToolMessage, BaseMessage)):
+                    text = getattr(last, "message", None)
                     if text:
                         clearStatus()
-                        console.print("\n[bold blue]Assistant:[/bold blue]")
-                        console.print(Markdown(text))
-                    if getattr(last, "tool_calls", None):
-                        clearStatus()
-                        for tc in last.tool_calls:
-                            args = ", ".join(
-                                f"{k}={v!r}" for k, v in tc.get("args", {}).items())
-                            console.print(
-                                f"\n[bold green]Tool:[/bold green] {tc['name']}({args})")
+                        console.print(f"\n[bold blue]{agentName}:[/bold blue]")
+                        console.print(Markdown(str(text)))
+                if text:
+                    clearStatus()
+                    console.print(f"\n[bold blue]{agentName}:[/bold blue]")
+                    console.print(Markdown(text))
+                if getattr(last, "tool_calls", None):
+                    clearStatus()
+                    for tc in last.tool_calls:
+                        args = ", ".join(
+                            f"{k}={v!r}" for k, v in tc.get("args", {}).items())
+                        console.print(
+                            f"\n[bold green]Tool:[/bold green] {tc['name']}({args})")
 
         elif nodeName == "toolNode":
             for msg in messages:
@@ -112,3 +119,7 @@ def runGraph(graph, initial_state: dict):
         console.print(Rule(style="green"))
         console.print("[bold green]  Success![/bold green]")
         console.print(Rule(style="green"))
+
+
+def drawGraph(graph):
+    display(Image(graph.get_graph().draw_mermaid_png()))

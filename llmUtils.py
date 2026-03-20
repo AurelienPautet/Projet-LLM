@@ -47,7 +47,8 @@ def responseIsEmpty(response: AIMessage) -> bool:
     return False
 
 
-def invokeModelWithRetries(model: ChatOpenAI, messages: list) -> AIMessage:
+def invokeAgentWithRetries(model: ChatOpenAI, systemPrompt: str, messages: list, schema: type[BaseModel] | None = None) -> AIMessage | BaseModel:
+    invoker = model.with_structured_output(schema) if schema else model
     for attempt in range(LLM_MAX_RETRIES):
         if attempt > 0:
             delay = LLM_RETRY_BASE_DELAY * (2 ** (attempt - 1))
@@ -55,7 +56,8 @@ def invokeModelWithRetries(model: ChatOpenAI, messages: list) -> AIMessage:
                 f"[red]LLM returned empty response, retrying (attempt {attempt}/{LLM_MAX_RETRIES - 1}, delay {delay:.1f}s)...[/red]"
             )
             time.sleep(delay)
-        response = model.invoke(messages)
-        if not responseIsEmpty(response):
+        response = invoker.invoke(
+            [{"role": "system", "content": systemPrompt}] + messages)
+        if schema or not responseIsEmpty(response):
             return response
     return response
