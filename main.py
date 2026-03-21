@@ -32,9 +32,11 @@ def main():
             break
 
         if category == "Add/modify a professional experience":
-            runGraph(career_graph, {"messages": [], "status": ""})
+            runGraph(career_graph, {"messages": [],
+                     "status": ""}, agentName="Experience manager")
         elif category == "Create a cv for a specific job offer (not implemented yet)":
-            runGraph(cv_graph, {"messages": [], "status": ""})
+            runGraph(cv_graph, {"messages": [], "status": ""},
+                     agentName="CV manager")
 
 
 if __name__ == "__main__":

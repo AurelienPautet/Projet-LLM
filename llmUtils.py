@@ -12,6 +12,7 @@ load_dotenv()
 LLM_MIN_TOKENS = int(os.getenv("AI_MIN_TOKENS", "2"))
 LLM_MAX_RETRIES = int(os.getenv("AI_MIN_TOKENS_RETRIES", "10"))
 LLM_RETRY_BASE_DELAY = float(os.getenv("AI_RETRY_BASE_DELAY", "1.0"))
+AI_CLIENT_MAX_RETRIES = int(os.getenv("AI_CLIENT_MAX_RETRIES", "5"))
 console = Console()
 
 
@@ -27,14 +28,18 @@ def schemaToEmbeddingText(obj: BaseModel) -> str:
     return "\n".join(lines)
 
 
-def buildModel(tools: list) -> ChatOpenAI:
+def buildChatModel() -> ChatOpenAI:
     return ChatOpenAI(
         model=os.getenv("AI_MODEL"),
         base_url=os.getenv("AI_ENDPOINT"),
         api_key=os.getenv("AI_API_KEY"),
         timeout=float(os.getenv("AI_TIMEOUT_SECONDS", "120")),
-        max_retries=1,
-    ).bind_tools(tools)
+        max_retries=AI_CLIENT_MAX_RETRIES,
+    )
+
+
+def buildModel(tools: list) -> ChatOpenAI:
+    return buildChatModel().bind_tools(tools)
 
 
 def responseIsEmpty(response: AIMessage) -> bool:

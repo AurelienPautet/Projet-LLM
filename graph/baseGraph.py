@@ -1,6 +1,6 @@
 from typing import Annotated, Any
 
-from langchain_core.messages import AIMessage, ToolMessage, BaseMessage
+from langchain_core.messages import AIMessage, ToolMessage, BaseMessage, HumanMessage
 from langgraph.graph.message import add_messages
 from langgraph.graph import MessagesState
 from pydantic import BaseModel
@@ -11,31 +11,49 @@ class BaseState(MessagesState):
     status: str
 
 
-def runGraph(graph, initial_state: dict):
+def runGraph(graph, initial_state: dict, agentName: str = "Assistant"):
     from rich.console import Console
     from rich.markdown import Markdown
     from rich.rule import Rule
+    from rich.prompt import Prompt
     import os
+    import json
 
     console = Console()
     DEBUG = os.getenv("DEBUG", "false").lower() == "true"
+    SHOW_TOOL_ACTIVITY = os.getenv(
+        "SHOW_TOOL_ACTIVITY", "true").lower() == "true"
+    SHOW_FULL_TOOL_ARGUMENTS = os.getenv(
+        "SHOW_FULL_TOOL_ARGUMENTS", "false").lower() == "true"
+    TOOL_ARGUMENT_PREVIEW_LENGTH = int(
+        os.getenv("TOOL_ARGUMENT_PREVIEW_LENGTH", "40"))
     hadError = False
     statusIndicator = None
+    lastToolHadError = False
+    lastStatusText = ""
 
     def setStatus(text: str):
-        nonlocal statusIndicator
+        nonlocal statusIndicator, lastStatusText
         if statusIndicator is not None:
             statusIndicator.stop()
+        lastStatusText = text
         if text:
             statusIndicator = console.status(
                 f"[dim]{text}[/dim]", spinner="dots")
             statusIndicator.start()
 
     def clearStatus():
-        nonlocal statusIndicator
+        nonlocal statusIndicator, lastStatusText
         if statusIndicator is not None:
             statusIndicator.stop()
             statusIndicator = None
+        lastStatusText = ""
+
+    def emitStatusLine(text: str):
+        nonlocal lastStatusText
+        if text and text != lastStatusText:
+            console.print(f"[dim]{text}[/dim]")
+            lastStatusText = text
 
     def toText(content: object) -> str:
         if isinstance(content, str):
@@ -49,12 +67,102 @@ def runGraph(graph, initial_state: dict):
             )
         return ""
 
-    if "status" in initial_state:
-        setStatus(initial_state["status"])
+    def formatToolArgValue(value: object) -> str:
+        text = repr(value)
+        if SHOW_FULL_TOOL_ARGUMENTS:
+            return text
+        if len(text) <= TOOL_ARGUMENT_PREVIEW_LENGTH:
+            return text
+        return f"{text[:TOOL_ARGUMENT_PREVIEW_LENGTH]}..."
 
-    for updates in graph.stream(initial_state, stream_mode="updates"):
+    def printToolCalls(message):
+        if not SHOW_TOOL_ACTIVITY:
+            return
+        toolCalls = getattr(message, "tool_calls", None)
+        if not toolCalls:
+            return
+        for tc in toolCalls:
+            args = ", ".join(
+                f"{k}={formatToolArgValue(v)}" for k, v in tc.get("args", {}).items())
+            console.print(
+                f"\n[bold green]Tool:[/bold green] {tc['name']}({args})")
+
+    def printAgentOutput(nodeName: str, message):
+        nonlocal hadError
+        text = toText(getattr(message, "content", ""))
+
+        if text.startswith("LLM error:"):
+            hadError = True
+            clearStatus()
+            console.print(Markdown(f"**Error:** {text}"), style="red")
+            return
+
+        if isinstance(message, BaseModel) and not isinstance(message, (AIMessage, ToolMessage, BaseMessage)):
+            modelText = getattr(message, "message", None)
+            if modelText:
+                clearStatus()
+                name = nodeName.replace("agentNode", "").replace("_", " ")
+                console.print(f"\n[bold blue]{name}:[/bold blue]")
+                console.print(Markdown(str(modelText)))
+
+        if text:
+            clearStatus()
+            name = nodeName.replace("agentNode", "").replace("_", " ")
+            if nodeName == "agent":
+                name = agentName
+            console.print(f"\n[bold blue]{name}:[/bold blue]")
+            console.print(Markdown(text))
+
+        printToolCalls(message)
+
+    def toStructuredPayload(structuredResponse):
+        if hasattr(structuredResponse, "model_dump"):
+            return structuredResponse.model_dump()
+        if isinstance(structuredResponse, dict):
+            return structuredResponse
+        return {"message": str(structuredResponse)}
+
+    def printStructuredMessage(nodeName: str, structuredResponse):
+        clearStatus()
+        payload = toStructuredPayload(structuredResponse)
+        message = payload.get("message", "")
+        if not message:
+            return
+        name = nodeName.replace("agentNode", "").replace("_", " ")
+        if nodeName == "agent":
+            name = agentName
+        console.print(f"\n[bold blue]{name}:[/bold blue]")
+        console.print(Markdown(str(message)))
+
+    def printStructuredOutput(nodeName: str, structuredResponse):
+        clearStatus()
+        name = nodeName.replace("agentNode", "").replace("_", " ")
+        if nodeName == "agent":
+            name = agentName
+        payload = toStructuredPayload(structuredResponse)
+        console.print(f"\n[bold blue]{name}:[/bold blue]")
+        console.print(json.dumps(payload, ensure_ascii=True, indent=2))
+
+    def printToolOutput(messages):
+        nonlocal hadError, lastToolHadError
+        toolHadError = False
+        for msg in messages:
+            if isinstance(msg, ToolMessage):
+                if "Error" in msg.content:
+                    hadError = True
+                    toolHadError = True
+                    clearStatus()
+                    console.print(
+                        Markdown(f"**Tool error:** {msg.content}"), style="red")
+                if DEBUG and SHOW_TOOL_ACTIVITY:
+                    clearStatus()
+                    console.print(
+                        f"[bold orange_red1]Tool output:[/bold orange_red1] {msg.content}")
+        lastToolHadError = toolHadError
+
+    def processUpdates(updates):
         if not updates:
-            continue
+            return None
 
         nodeName = next(iter(updates))
         nodeData = updates[nodeName]
@@ -67,48 +175,120 @@ def runGraph(graph, initial_state: dict):
                 clearStatus()
 
         messages = nodeData.get("messages", [])
+        structuredResponse = nodeData.get("structured_response")
+        hasStructuredOutput = structuredResponse is not None
+        aiMessages = [
+            msg for msg in messages if isinstance(msg, AIMessage)]
+
+        showStructuredOutput = hasStructuredOutput
+        if hasStructuredOutput:
+            payload = toStructuredPayload(structuredResponse)
+            structuredMessage = str(payload.get("message", "")).strip()
+            isFallbackStructuredError = structuredMessage.startswith(
+                "I could not produce a structured"
+            )
+            hasRealAiText = any(
+                (toText(getattr(msg, "content", "")).strip()) and
+                (not toText(getattr(msg, "content", "")).strip().startswith("LLM error:"))
+                for msg in aiMessages
+            )
+            if isFallbackStructuredError and hasRealAiText:
+                showStructuredOutput = False
+
         if not messages:
-            continue
-        last = messages[-1]
+            return []
 
-        if "agentNode" in nodeName:
-            text = toText(last.content)
-            if text.startswith("LLM error:"):
-                hadError = True
-                clearStatus()
-                console.print(Markdown(f"**Error:** {text}"), style="red")
+        hasToolCalls = any(getattr(msg, "tool_calls", None)
+                           for msg in messages)
+        hasToolMessages = any(isinstance(msg, ToolMessage) for msg in messages)
+
+        if SHOW_TOOL_ACTIVITY and (nodeName == "tools" or nodeName == "toolNode"):
+            setStatus("Running tools...")
+        elif hasToolMessages and lastToolHadError:
+            setStatus("Handling error...")
+        elif SHOW_TOOL_ACTIVITY and (hasToolMessages or nodeName == "agent" or "agentNode" in nodeName):
+            setStatus("Analysing tool output...")
+
+        if hasToolMessages:
+            toolMessages = [
+                msg for msg in messages if isinstance(msg, ToolMessage)]
+            printToolOutput(toolMessages)
+            if lastToolHadError:
+                setStatus("Handling error...")
+            elif SHOW_TOOL_ACTIVITY:
+                setStatus("Analysing tool output...")
+                emitStatusLine("Analysing tool output...")
+
+        if "agentNode" in nodeName or nodeName == "agent":
+            if aiMessages:
+                structuredMessage = ""
+                if showStructuredOutput:
+                    payload = toStructuredPayload(structuredResponse)
+                    structuredMessage = str(payload.get("message", "")).strip()
+
+                for msg in aiMessages[:-1]:
+                    msgText = toText(getattr(msg, "content", "")).strip()
+                    if msgText or getattr(msg, "tool_calls", None):
+                        printAgentOutput(nodeName, msg)
+
+                lastAi = aiMessages[-1]
+                lastText = toText(getattr(lastAi, "content", "")).strip()
+                if DEBUG:
+                    printAgentOutput(nodeName, lastAi)
+                else:
+                    if lastText.startswith("LLM error:"):
+                        printAgentOutput(nodeName, lastAi)
+                    elif lastText and lastText != structuredMessage:
+                        printAgentOutput(nodeName, lastAi)
+
+        if showStructuredOutput:
+            if DEBUG:
+                printStructuredOutput(nodeName, structuredResponse)
             else:
-                agentName = nodeName.replace("agentNode", "").replace("_", " ")
-                if isinstance(last, BaseModel) and not isinstance(last, (AIMessage, ToolMessage, BaseMessage)):
-                    text = getattr(last, "message", None)
-                    if text:
-                        clearStatus()
-                        console.print(f"\n[bold blue]{agentName}:[/bold blue]")
-                        console.print(Markdown(str(text)))
-                if text:
-                    clearStatus()
-                    console.print(f"\n[bold blue]{agentName}:[/bold blue]")
-                    console.print(Markdown(text))
-                if getattr(last, "tool_calls", None):
-                    clearStatus()
-                    for tc in last.tool_calls:
-                        args = ", ".join(
-                            f"{k}={v!r}" for k, v in tc.get("args", {}).items())
-                        console.print(
-                            f"\n[bold green]Tool:[/bold green] {tc['name']}({args})")
+                printStructuredMessage(nodeName, structuredResponse)
 
-        elif nodeName == "toolNode":
-            for msg in messages:
-                if isinstance(msg, ToolMessage):
-                    if "Error" in msg.content:
-                        hadError = True
-                        clearStatus()
-                        console.print(
-                            Markdown(f"**Tool error:** {msg.content}"), style="red")
-                    if DEBUG:
-                        clearStatus()
-                        console.print(
-                            f"[bold orange_red1]Tool output:[/bold orange_red1] {msg.content}")
+        if hasToolCalls and DEBUG and SHOW_TOOL_ACTIVITY:
+            setStatus("Running tools...")
+            emitStatusLine("Running tools...")
+
+        return messages
+
+    history = list(initial_state.get("messages", []))
+    seenMessageIds = {
+        getattr(message, "id", None)
+        for message in history
+        if getattr(message, "id", None)
+    }
+
+    while True:
+        try:
+            question = Prompt.ask("\n[bold magenta]You[/bold magenta]")
+        except (EOFError, KeyboardInterrupt):
+            break
+
+        if question is None:
+            break
+
+        cleaned = question.strip().lower()
+        if cleaned in {"quit", "exit", "back"}:
+            break
+
+        userMessage = HumanMessage(content=question)
+        history.append(userMessage)
+        setStatus("Thinking...")
+
+        for updates in graph.stream({"messages": history}, stream_mode="updates"):
+            newMessages = processUpdates(updates)
+            if not newMessages:
+                continue
+            for message in newMessages:
+                messageId = getattr(message, "id", None)
+                if messageId:
+                    if messageId in seenMessageIds:
+                        continue
+                    seenMessageIds.add(messageId)
+                history.append(message)
+        clearStatus()
 
     clearStatus()
     if hadError:
