@@ -61,8 +61,10 @@ def extractStructuredOutput(result: dict) -> dict:
     return toDict(structured)
 
 
-def invokeStructuredAgent(agent, inputPayload: dict) -> dict:
-    return agent.invoke(inputPayload, config={"recursion_limit": AGENT_RECURSION_LIMIT})
+def invokeStructuredAgent(agent, inputPayload: dict, config: dict = None) -> dict:
+    cfg = dict(config) if config else {}
+    cfg["recursion_limit"] = AGENT_RECURSION_LIMIT
+    return agent.invoke(inputPayload, config=cfg)
 
 
 def formatLlmError(error: Exception) -> str:
@@ -97,11 +99,13 @@ cvWriterAgent = buildCvWriterAgent()
 atsReviewerAgent = buildAtsReviewerAgent()
 
 
-def agentNodeCV_writer(state: CVState) -> dict:
+from langchain_core.runnables import RunnableConfig
+
+def agentNodeCV_writer(state: CVState, config: RunnableConfig) -> dict:
     try:
         inputMessages = state["messages"]
         result = invokeStructuredAgent(
-            cvWriterAgent, {"messages": inputMessages})
+            cvWriterAgent, {"messages": inputMessages}, config)
         allMessages = result.get("messages", [])
         newMessages = allMessages[len(inputMessages):]
         writerOutput = extractStructuredOutput(result)
@@ -110,13 +114,11 @@ def agentNodeCV_writer(state: CVState) -> dict:
                 "message": "I could not produce a structured CV response. Please retry.",
                 "cv": None,
             }
-        nextStatus = "Reviewing CV for ATS compatibility..." if writerOutput.get(
-            "cv") else ""
         return {
             "messages": newMessages,
             "writerOutput": writerOutput,
             "structured_response": writerOutput,
-            "status": nextStatus,
+            "status": "",
         }
     except GraphRecursionError:
         writerOutput = {
@@ -142,7 +144,7 @@ def agentNodeCV_writer(state: CVState) -> dict:
         }
 
 
-def agentNodeATS_reviewer(state: CVState) -> dict:
+def agentNodeATS_reviewer(state: CVState, config: RunnableConfig) -> dict:
     try:
         writerOutput = state.get("writerOutput") or {}
         if not writerOutput.get("cv"):
@@ -160,9 +162,9 @@ def agentNodeATS_reviewer(state: CVState) -> dict:
         reviewerContext = SystemMessage(
             content=f"CV writer output JSON:\n{json.dumps(writerOutput, ensure_ascii=True)}"
         )
-        inputMessages = list(state["messages"]) + [reviewerContext]
+        inputMessages = [reviewerContext]
         result = invokeStructuredAgent(
-            atsReviewerAgent, {"messages": inputMessages})
+            atsReviewerAgent, {"messages": inputMessages}, config)
         allMessages = result.get("messages", [])
         newMessages = allMessages[len(inputMessages):]
         reviewerOutput = extractStructuredOutput(result)
@@ -204,6 +206,14 @@ def agentNodeATS_reviewer(state: CVState) -> dict:
         }
 
 
+def edgeNodeCvWriterToAtsReviewer(state: CVState) -> dict:
+    return {"status": "Reviewing CV for ATS compatibility..."}
+
+
+def edgeNodeAtsReviewerToCvWriter(state: CVState) -> dict:
+    return {"status": "Improving CV based on ATS feedback..."}
+
+
 def buildGraph() -> StateGraph:
     def routeAfterCvWriter(state: CVState) -> str:
         writerOutput = state.get("writerOutput") or {}
@@ -217,30 +227,34 @@ def buildGraph() -> StateGraph:
             atsScore = int(reviewerOutput.get("ats", 0) or 0)
         except Exception:
             atsScore = 0
-        if atsScore < 90:
+        if atsScore < 80:
             return "cvWriter"
         return "human"
 
     graph = StateGraph(CVState)
     graph.add_node("agentNodeCV_writer", agentNodeCV_writer)
     graph.add_node("agentNodeATS_reviewer", agentNodeATS_reviewer)
+    graph.add_node("edgeNodeCvWriterToAtsReviewer", edgeNodeCvWriterToAtsReviewer)
+    graph.add_node("edgeNodeAtsReviewerToCvWriter", edgeNodeAtsReviewerToCvWriter)
     graph.add_edge(START, "agentNodeCV_writer")
     graph.add_conditional_edges(
         "agentNodeCV_writer",
         routeAfterCvWriter,
         {
-            "atsReviewer": "agentNodeATS_reviewer",
+            "atsReviewer": "edgeNodeCvWriterToAtsReviewer",
             "human": END,
         },
     )
+    graph.add_edge("edgeNodeCvWriterToAtsReviewer", "agentNodeATS_reviewer")
     graph.add_conditional_edges(
         "agentNodeATS_reviewer",
         routeAfterAtsReviewer,
         {
-            "cvWriter": "agentNodeCV_writer",
+            "cvWriter": "edgeNodeAtsReviewerToCvWriter",
             "human": END,
         },
     )
+    graph.add_edge("edgeNodeAtsReviewerToCvWriter", "agentNodeCV_writer")
     return graph.compile()
 
 

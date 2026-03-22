@@ -31,6 +31,15 @@ def runGraph(graph, initial_state: dict, agentName: str = "Assistant"):
     statusIndicator = None
     lastToolHadError = False
     lastStatusText = ""
+    lastPrintedName = ""
+    lastPrintedText = ""
+
+    history = list(initial_state.get("messages", []))
+    seenMessageIds = {
+        getattr(message, "id", None)
+        for message in history
+        if getattr(message, "id", None)
+    }
 
     def setStatus(text: str):
         nonlocal statusIndicator, lastStatusText
@@ -87,7 +96,27 @@ def runGraph(graph, initial_state: dict, agentName: str = "Assistant"):
             console.print(
                 f"\n[bold green]Tool:[/bold green] {tc['name']}({args})")
 
-    def printAgentOutput(nodeName: str, message):
+    def resolveDisplayName(nodeName: str, parentNodeName: str | None = None) -> str:
+        resolvedNodeName = nodeName
+        if nodeName in ("agent", "model") and parentNodeName:
+            resolvedNodeName = parentNodeName
+        name = resolvedNodeName.replace("agentNode", "").replace("_", " ")
+        if resolvedNodeName in ("agent", "model"):
+            name = agentName
+        return name
+
+    def shouldPrintMessage(name: str, text: str) -> bool:
+        nonlocal lastPrintedName, lastPrintedText
+        normalizedText = text.strip()
+        if not normalizedText:
+            return False
+        if lastPrintedName == name and lastPrintedText == normalizedText:
+            return False
+        lastPrintedName = name
+        lastPrintedText = normalizedText
+        return True
+
+    def printAgentOutput(nodeName: str, message, parentNodeName: str | None = None):
         nonlocal hadError
         text = toText(getattr(message, "content", ""))
 
@@ -99,17 +128,15 @@ def runGraph(graph, initial_state: dict, agentName: str = "Assistant"):
 
         if isinstance(message, BaseModel) and not isinstance(message, (AIMessage, ToolMessage, BaseMessage)):
             modelText = getattr(message, "message", None)
-            if modelText:
+            if modelText and shouldPrintMessage(resolveDisplayName(nodeName, parentNodeName), str(modelText)):
                 clearStatus()
-                name = nodeName.replace("agentNode", "").replace("_", " ")
+                name = resolveDisplayName(nodeName, parentNodeName)
                 console.print(f"\n[bold blue]{name}:[/bold blue]")
                 console.print(Markdown(str(modelText)))
 
-        if text:
+        if text and shouldPrintMessage(resolveDisplayName(nodeName, parentNodeName), text):
             clearStatus()
-            name = nodeName.replace("agentNode", "").replace("_", " ")
-            if nodeName == "agent":
-                name = agentName
+            name = resolveDisplayName(nodeName, parentNodeName)
             console.print(f"\n[bold blue]{name}:[/bold blue]")
             console.print(Markdown(text))
 
@@ -122,23 +149,21 @@ def runGraph(graph, initial_state: dict, agentName: str = "Assistant"):
             return structuredResponse
         return {"message": str(structuredResponse)}
 
-    def printStructuredMessage(nodeName: str, structuredResponse):
+    def printStructuredMessage(nodeName: str, structuredResponse, parentNodeName: str | None = None):
         clearStatus()
         payload = toStructuredPayload(structuredResponse)
         message = payload.get("message", "")
         if not message:
             return
-        name = nodeName.replace("agentNode", "").replace("_", " ")
-        if nodeName == "agent":
-            name = agentName
+        name = resolveDisplayName(nodeName, parentNodeName)
+        if not shouldPrintMessage(name, str(message)):
+            return
         console.print(f"\n[bold blue]{name}:[/bold blue]")
         console.print(Markdown(str(message)))
 
-    def printStructuredOutput(nodeName: str, structuredResponse):
+    def printStructuredOutput(nodeName: str, structuredResponse, parentNodeName: str | None = None):
         clearStatus()
-        name = nodeName.replace("agentNode", "").replace("_", " ")
-        if nodeName == "agent":
-            name = agentName
+        name = resolveDisplayName(nodeName, parentNodeName)
         payload = toStructuredPayload(structuredResponse)
         console.print(f"\n[bold blue]{name}:[/bold blue]")
         console.print(json.dumps(payload, ensure_ascii=True, indent=2))
@@ -160,12 +185,14 @@ def runGraph(graph, initial_state: dict, agentName: str = "Assistant"):
                         f"[bold orange_red1]Tool output:[/bold orange_red1] {msg.content}")
         lastToolHadError = toolHadError
 
-    def processUpdates(updates):
+    def processUpdates(updates, parentNodeName: str | None = None):
         if not updates:
             return None
 
         nodeName = next(iter(updates))
         nodeData = updates[nodeName]
+        effectiveNodeName = parentNodeName if nodeName in (
+            "agent", "model") and parentNodeName else nodeName
 
         if "status" in nodeData:
             newStatus = nodeData["status"]
@@ -189,7 +216,8 @@ def runGraph(graph, initial_state: dict, agentName: str = "Assistant"):
             )
             hasRealAiText = any(
                 (toText(getattr(msg, "content", "")).strip()) and
-                (not toText(getattr(msg, "content", "")).strip().startswith("LLM error:"))
+                (not toText(getattr(msg, "content", "")
+                            ).strip().startswith("LLM error:"))
                 for msg in aiMessages
             )
             if isFallbackStructuredError and hasRealAiText:
@@ -202,16 +230,16 @@ def runGraph(graph, initial_state: dict, agentName: str = "Assistant"):
                            for msg in messages)
         hasToolMessages = any(isinstance(msg, ToolMessage) for msg in messages)
 
-        if SHOW_TOOL_ACTIVITY and (nodeName == "tools" or nodeName == "toolNode"):
+        if SHOW_TOOL_ACTIVITY and (effectiveNodeName == "tools" or effectiveNodeName == "toolNode"):
             setStatus("Running tools...")
         elif hasToolMessages and lastToolHadError:
             setStatus("Handling error...")
-        elif SHOW_TOOL_ACTIVITY and (hasToolMessages or nodeName == "agent" or "agentNode" in nodeName):
+        elif SHOW_TOOL_ACTIVITY and (hasToolMessages or effectiveNodeName == "agent" or "agentNode" in effectiveNodeName or effectiveNodeName == "model"):
             setStatus("Analysing tool output...")
 
         if hasToolMessages:
             toolMessages = [
-                msg for msg in messages if isinstance(msg, ToolMessage)]
+                msg for msg in messages if isinstance(msg, ToolMessage) and getattr(msg, "id", None) not in seenMessageIds]
             printToolOutput(toolMessages)
             if lastToolHadError:
                 setStatus("Handling error...")
@@ -219,7 +247,11 @@ def runGraph(graph, initial_state: dict, agentName: str = "Assistant"):
                 setStatus("Analysing tool output...")
                 emitStatusLine("Analysing tool output...")
 
-        if "agentNode" in nodeName or nodeName == "agent":
+        if "agentNode" in effectiveNodeName or effectiveNodeName == "agent" or effectiveNodeName == "model":
+            # Add filtering so we don't re-print the same AI Messages
+            aiMessages = [
+                msg for msg in aiMessages if getattr(msg, "id", None) not in seenMessageIds
+            ]
             if aiMessages:
                 structuredMessage = ""
                 if showStructuredOutput:
@@ -229,23 +261,30 @@ def runGraph(graph, initial_state: dict, agentName: str = "Assistant"):
                 for msg in aiMessages[:-1]:
                     msgText = toText(getattr(msg, "content", "")).strip()
                     if msgText or getattr(msg, "tool_calls", None):
-                        printAgentOutput(nodeName, msg)
+                        printAgentOutput(effectiveNodeName,
+                                         msg, parentNodeName)
 
                 lastAi = aiMessages[-1]
                 lastText = toText(getattr(lastAi, "content", "")).strip()
                 if DEBUG:
-                    printAgentOutput(nodeName, lastAi)
+                    printAgentOutput(effectiveNodeName, lastAi, parentNodeName)
                 else:
                     if lastText.startswith("LLM error:"):
-                        printAgentOutput(nodeName, lastAi)
+                        printAgentOutput(effectiveNodeName,
+                                         lastAi, parentNodeName)
                     elif lastText and lastText != structuredMessage:
-                        printAgentOutput(nodeName, lastAi)
+                        printAgentOutput(effectiveNodeName,
+                                         lastAi, parentNodeName)
+                    elif getattr(lastAi, "tool_calls", None):
+                        printToolCalls(lastAi)
 
         if showStructuredOutput:
             if DEBUG:
-                printStructuredOutput(nodeName, structuredResponse)
+                printStructuredOutput(
+                    effectiveNodeName, structuredResponse, parentNodeName)
             else:
-                printStructuredMessage(nodeName, structuredResponse)
+                printStructuredMessage(
+                    effectiveNodeName, structuredResponse, parentNodeName)
 
         if hasToolCalls and DEBUG and SHOW_TOOL_ACTIVITY:
             setStatus("Running tools...")
@@ -277,8 +316,18 @@ def runGraph(graph, initial_state: dict, agentName: str = "Assistant"):
         history.append(userMessage)
         setStatus("Thinking...")
 
-        for updates in graph.stream({"messages": history}, stream_mode="updates"):
-            newMessages = processUpdates(updates)
+        for event in graph.stream({"messages": history}, stream_mode="updates", subgraphs=True):
+            parentNodeName = None
+            if isinstance(event, tuple) and len(event) == 2:
+                path, updates = event
+                if isinstance(path, tuple) and len(path) > 0:
+                    lastPathItem = path[-1]
+                    if isinstance(lastPathItem, str) and lastPathItem:
+                        parentNodeName = lastPathItem.split(":", 1)[0]
+            else:
+                updates = event
+            newMessages = processUpdates(
+                updates, parentNodeName=parentNodeName)
             if not newMessages:
                 continue
             for message in newMessages:
