@@ -1,5 +1,5 @@
 import os
-from datetime import date
+from datetime import date, datetime
 from typing import List, Optional
 from enum import Enum
 from dotenv import load_dotenv
@@ -14,6 +14,13 @@ class ExperienceType(str, Enum):
     PROFESSIONAL = "professional"
     EDUCATIONAL = "educational"
     PROJECT = "project"
+
+
+class OfferStatus(str, Enum):
+    OFFER_COLLECTED = "offer_collected"
+    CV_GENERATED = "cv_generated"
+    COVER_LETTER_GENERATED = "cover_letter_generated"
+    COMPLETED = "completed"
 
 
 class ExperienceBase(SQLModel):
@@ -61,6 +68,38 @@ class PersonalInfo(PersonalInfoBase, table=True):
 
 class PersonalInfoResult(PersonalInfoBase):
     id: int
+
+
+class OfferBase(SQLModel):
+    offerText: str = Field(description="the internship/job offer text content")
+    offerSource: Optional[str] = Field(
+        default=None,
+        description="the source URL or origin of the offer"
+    )
+    cvOutput: Optional[str] = Field(
+        default=None,
+        description="the generated CV output associated with this offer"
+    )
+    coverLetterOutput: Optional[str] = Field(
+        default=None,
+        description="the generated cover letter output associated with this offer"
+    )
+    status: OfferStatus = Field(
+        default=OfferStatus.OFFER_COLLECTED,
+        description="current workflow status for this offer"
+    )
+
+
+class Offer(OfferBase, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    createdAt: datetime = Field(default_factory=datetime.utcnow)
+    updatedAt: datetime = Field(default_factory=datetime.utcnow)
+
+
+class OfferResult(OfferBase):
+    id: int
+    createdAt: datetime
+    updatedAt: datetime
 
 
 DATABASE_URL = os.getenv(

@@ -11,7 +11,7 @@ class BaseState(MessagesState):
     status: str
 
 
-def runGraph(graph, initial_state: dict, agentName: str = "Assistant"):
+def runGraph(graph, initial_state: dict, agentName: str = "Assistant", firstQuestion: str | None = None, allowUserInput: bool = True):
     from rich.console import Console
     from rich.markdown import Markdown
     from rich.rule import Rule
@@ -53,7 +53,7 @@ def runGraph(graph, initial_state: dict, agentName: str = "Assistant"):
         lastStatusText = text
         if text:
             statusIndicator = console.status(
-                f"[dim]{text}[/dim]", spinner="dots")
+                f"[bold cyan]{text}[/bold cyan]", spinner="dots")
             statusIndicator.start()
 
     def clearStatus():
@@ -309,18 +309,10 @@ def runGraph(graph, initial_state: dict, agentName: str = "Assistant"):
         if getattr(message, "id", None)
     }
 
-    while True:
-        try:
-            question = Prompt.ask("\n[bold magenta]You[/bold magenta]")
-        except (EOFError, KeyboardInterrupt):
-            break
-
-        if question is None:
-            break
-
+    def processQuestion(question: str) -> bool:
         cleaned = question.strip().lower()
         if cleaned in {"quit", "exit", "back"}:
-            break
+            return False
 
         userMessage = HumanMessage(content=question)
         history.append(userMessage)
@@ -361,16 +353,27 @@ def runGraph(graph, initial_state: dict, agentName: str = "Assistant"):
                     seenMessageIds.add(messageId)
                 history.append(message)
         clearStatus()
+        return True
+
+    if firstQuestion and firstQuestion.strip():
+        if not processQuestion(firstQuestion):
+            clearStatus()
+            return
+
+    if allowUserInput:
+        while True:
+            try:
+                question = Prompt.ask("\n[bold magenta]You[/bold magenta]")
+            except (EOFError, KeyboardInterrupt):
+                break
+
+            if question is None:
+                break
+
+            if not processQuestion(question):
+                break
 
     clearStatus()
-    if hadError:
-        console.print(Rule(style="yellow"))
-        console.print("[bold yellow]  Finished with errors[/bold yellow]")
-        console.print(Rule(style="yellow"))
-    else:
-        console.print(Rule(style="green"))
-        console.print("[bold green]  Success![/bold green]")
-        console.print(Rule(style="green"))
 
 
 def drawGraph(graph):

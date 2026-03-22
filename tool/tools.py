@@ -4,7 +4,7 @@ import shutil
 import subprocess
 import tempfile
 from datetime import datetime
-from typing import List
+from typing import List, Optional
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
@@ -14,7 +14,7 @@ from sqlmodel import Session, select
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import cast
 
-from db.db import engine, Experience, ExperienceBase, ExperienceResult, PersonalInfo
+from db.db import engine, Experience, ExperienceBase, ExperienceResult, PersonalInfo, Offer, OfferStatus
 from graph.embedding import createEmbeddingFromText
 from llmUtils import schemaToEmbeddingText
 
@@ -109,6 +109,88 @@ def extractPlainTextFromLatex(latexCode: str) -> str:
     text = text.replace("{", " ").replace("}", " ")
     text = re.sub(r"\s+", " ", text).strip()
     return text
+
+
+def saveOfferRecord(offerText: str, offerSource: Optional[str] = None, status: OfferStatus = OfferStatus.OFFER_COLLECTED) -> Offer:
+    cleanOfferText = (offerText or "").strip()
+    if not cleanOfferText:
+        raise ValueError("offerText cannot be empty")
+    cleanOfferSource = (offerSource or "").strip() or None
+    now = datetime.utcnow()
+    with Session(engine) as session:
+        dbOffer = Offer(
+            offerText=cleanOfferText,
+            offerSource=cleanOfferSource,
+            status=status,
+            updatedAt=now,
+        )
+        session.add(dbOffer)
+        session.commit()
+        session.refresh(dbOffer)
+        return dbOffer
+
+
+def getActiveOfferRecord() -> Optional[Offer]:
+    with Session(engine) as session:
+        return session.exec(select(Offer).order_by(Offer.updatedAt.desc(), Offer.id.desc())).first()
+
+
+def getOfferByIdRecord(offerId: int) -> Optional[Offer]:
+    with Session(engine) as session:
+        return session.get(Offer, offerId)
+
+
+def updateOfferStatusRecord(offerId: int, status: OfferStatus) -> Offer:
+    with Session(engine) as session:
+        dbOffer = session.get(Offer, offerId)
+        if dbOffer is None:
+            raise ValueError(f"no offer found with id={offerId}")
+        dbOffer.status = status
+        dbOffer.updatedAt = datetime.utcnow()
+        session.add(dbOffer)
+        session.commit()
+        session.refresh(dbOffer)
+        return dbOffer
+
+
+def updateOfferCvOutputRecord(offerId: int, cvOutput: str) -> Offer:
+    cleanCvOutput = (cvOutput or "").strip()
+    if not cleanCvOutput:
+        raise ValueError("cvOutput cannot be empty")
+    with Session(engine) as session:
+        dbOffer = session.get(Offer, offerId)
+        if dbOffer is None:
+            raise ValueError(f"no offer found with id={offerId}")
+        dbOffer.cvOutput = cleanCvOutput
+        if dbOffer.coverLetterOutput:
+            dbOffer.status = OfferStatus.COMPLETED
+        else:
+            dbOffer.status = OfferStatus.CV_GENERATED
+        dbOffer.updatedAt = datetime.utcnow()
+        session.add(dbOffer)
+        session.commit()
+        session.refresh(dbOffer)
+        return dbOffer
+
+
+def updateOfferCoverLetterOutputRecord(offerId: int, coverLetterOutput: str) -> Offer:
+    cleanCoverLetterOutput = (coverLetterOutput or "").strip()
+    if not cleanCoverLetterOutput:
+        raise ValueError("coverLetterOutput cannot be empty")
+    with Session(engine) as session:
+        dbOffer = session.get(Offer, offerId)
+        if dbOffer is None:
+            raise ValueError(f"no offer found with id={offerId}")
+        dbOffer.coverLetterOutput = cleanCoverLetterOutput
+        if dbOffer.cvOutput:
+            dbOffer.status = OfferStatus.COMPLETED
+        else:
+            dbOffer.status = OfferStatus.COVER_LETTER_GENERATED
+        dbOffer.updatedAt = datetime.utcnow()
+        session.add(dbOffer)
+        session.commit()
+        session.refresh(dbOffer)
+        return dbOffer
 
 
 @tool
@@ -393,3 +475,83 @@ def fetchWebPageContent(url: str) -> str:
         return content
     except Exception as exc:
         return f"Error: fetchWebPageContent failed: {exc}"
+
+
+@tool
+def saveOffer(offerText: str, offerSource: str = "") -> str:
+    """Save a new offer in database and mark it as collected."""
+    try:
+        dbOffer = saveOfferRecord(offerText=offerText, offerSource=offerSource)
+        return f"Offer saved with id={dbOffer.id} and status={dbOffer.status.value}"
+    except Exception as exc:
+        return f"Error: saveOffer failed: {exc}"
+
+
+@tool
+def getActiveOffer() -> str:
+    """Get the most recently active offer from database."""
+    try:
+        dbOffer = getActiveOfferRecord()
+        if dbOffer is None:
+            return "No active offer found."
+        source = dbOffer.offerSource or "N/A"
+        cvLength = len(dbOffer.cvOutput or "")
+        coverLength = len(dbOffer.coverLetterOutput or "")
+        return (
+            f"id={dbOffer.id} | status={dbOffer.status.value} | source={source} | "
+            f"cvChars={cvLength} | coverLetterChars={coverLength} | offerText={dbOffer.offerText}"
+        )
+    except Exception as exc:
+        return f"Error: getActiveOffer failed: {exc}"
+
+
+@tool
+def getOfferById(offerId: int) -> str:
+    """Get one offer by id from database."""
+    try:
+        dbOffer = getOfferByIdRecord(offerId)
+        if dbOffer is None:
+            return f"No offer found with id={offerId}."
+        source = dbOffer.offerSource or "N/A"
+        cvLength = len(dbOffer.cvOutput or "")
+        coverLength = len(dbOffer.coverLetterOutput or "")
+        return (
+            f"id={dbOffer.id} | status={dbOffer.status.value} | source={source} | "
+            f"cvChars={cvLength} | coverLetterChars={coverLength} | offerText={dbOffer.offerText}"
+        )
+    except Exception as exc:
+        return f"Error: getOfferById failed: {exc}"
+
+
+@tool
+def updateOfferStatus(offerId: int, status: str) -> str:
+    """Update the workflow status of an offer by id."""
+    try:
+        normalized = OfferStatus(status.strip().lower())
+        dbOffer = updateOfferStatusRecord(offerId=offerId, status=normalized)
+        return f"Offer status updated: id={dbOffer.id}, status={dbOffer.status.value}"
+    except Exception as exc:
+        return f"Error: updateOfferStatus failed: {exc}"
+
+
+@tool
+def updateOfferCvOutput(offerId: int, cvOutput: str) -> str:
+    """Save generated CV output in an offer row and update offer status."""
+    try:
+        dbOffer = updateOfferCvOutputRecord(offerId=offerId, cvOutput=cvOutput)
+        return f"Offer CV output updated: id={dbOffer.id}, status={dbOffer.status.value}"
+    except Exception as exc:
+        return f"Error: updateOfferCvOutput failed: {exc}"
+
+
+@tool
+def updateOfferCoverLetterOutput(offerId: int, coverLetterOutput: str) -> str:
+    """Save generated cover letter output in an offer row and update offer status."""
+    try:
+        dbOffer = updateOfferCoverLetterOutputRecord(
+            offerId=offerId,
+            coverLetterOutput=coverLetterOutput,
+        )
+        return f"Offer cover letter output updated: id={dbOffer.id}, status={dbOffer.status.value}"
+    except Exception as exc:
+        return f"Error: updateOfferCoverLetterOutput failed: {exc}"

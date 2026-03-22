@@ -9,7 +9,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langgraph.graph import StateGraph, START, END
 from langgraph.errors import GraphRecursionError
 
-from tool.tools import searchExperiences, getAllExperiences, getExperienceCount, getPersonalInfo, getAllPersonalInfo, generatePdfFromLatex, fetchWebPageContent
+from tool.tools import searchExperiences, getAllExperiences, getExperienceCount, getPersonalInfo, getAllPersonalInfo, generatePdfFromLatex, fetchWebPageContent, saveOfferRecord, getActiveOfferRecord, getOfferByIdRecord, updateOfferCoverLetterOutputRecord
 from graph.baseGraph import BaseState
 from llmUtils import buildChatModel, extractStructuredOutput, invokeStructuredAgentWithEnforcedResponseTool, invokeStructuredAgent, formatLlmError
 
@@ -22,6 +22,7 @@ class CoverLetterState(BaseState):
     internshipOfferText: Optional[str] = None
     internshipOfferSource: Optional[str] = None
     questionAskerHasRun: bool = False
+    activeOfferId: Optional[int] = None
 
 
 class CoverLetterWriterResponse(BaseModel):
@@ -136,14 +137,34 @@ def extractLatestUrlFromHumanMessages(messages: list) -> str:
 
 def agentNodeOfferIntake(state: CoverLetterState, config: dict) -> dict:
     try:
+        stateOfferId = state.get("activeOfferId")
+        if stateOfferId:
+            activeOffer = getOfferByIdRecord(int(stateOfferId))
+            if activeOffer is not None:
+                return {
+                    "internshipOfferText": activeOffer.offerText,
+                    "internshipOfferSource": activeOffer.offerSource,
+                    "activeOfferId": activeOffer.id,
+                    "status": "",
+                }
+
         allMessages = list(state.get("messages") or [])
         userText = extractLatestHumanText(allMessages)
         latestUrl = extractLatestUrlFromHumanMessages(allMessages)
 
         if not userText and not latestUrl:
+            activeOffer = getActiveOfferRecord()
+            if activeOffer is None:
+                return {
+                    "internshipOfferText": None,
+                    "internshipOfferSource": None,
+                    "activeOfferId": None,
+                    "status": "",
+                }
             return {
-                "internshipOfferText": None,
-                "internshipOfferSource": None,
+                "internshipOfferText": activeOffer.offerText,
+                "internshipOfferSource": activeOffer.offerSource,
+                "activeOfferId": activeOffer.id,
                 "status": "",
             }
 
@@ -163,6 +184,7 @@ def agentNodeOfferIntake(state: CoverLetterState, config: dict) -> dict:
         if not intakeOutput:
             internshipOfferText = None
             internshipOfferSource = None
+            activeOfferId = None
         else:
             hasOffer = bool(intakeOutput.get("hasOffer", False))
             internshipOfferText = str(intakeOutput.get(
@@ -173,10 +195,24 @@ def agentNodeOfferIntake(state: CoverLetterState, config: dict) -> dict:
                 internshipOfferText = None
             if not internshipOfferSource:
                 internshipOfferSource = None
+            activeOfferId = None
+            if internshipOfferText:
+                dbOffer = saveOfferRecord(
+                    offerText=internshipOfferText,
+                    offerSource=internshipOfferSource,
+                )
+                activeOfferId = dbOffer.id
+            else:
+                activeOffer = getActiveOfferRecord()
+                if activeOffer is not None:
+                    internshipOfferText = activeOffer.offerText
+                    internshipOfferSource = activeOffer.offerSource
+                    activeOfferId = activeOffer.id
 
         return {
             "internshipOfferText": internshipOfferText,
             "internshipOfferSource": internshipOfferSource,
+            "activeOfferId": activeOfferId,
             "status": "",
         }
     except Exception as exc:
@@ -184,6 +220,7 @@ def agentNodeOfferIntake(state: CoverLetterState, config: dict) -> dict:
             "messages": [AIMessage(content=formatLlmError(exc))],
             "internshipOfferText": None,
             "internshipOfferSource": None,
+            "activeOfferId": None,
             "status": "",
         }
 
@@ -286,6 +323,16 @@ def agentNodeCoverLetterWriter(state: CoverLetterState, config: dict) -> dict:
                 "message": "I could not produce a structured cover letter response. Please retry.",
                 "coverLetter": None,
             }
+        activeOfferId = state.get("activeOfferId")
+        if activeOfferId and writerOutput.get("coverLetter"):
+            try:
+                updateOfferCoverLetterOutputRecord(
+                    offerId=int(activeOfferId),
+                    coverLetterOutput=str(
+                        writerOutput.get("coverLetter") or ""),
+                )
+            except Exception:
+                pass
         return {
             "messages": newMessages,
             "writerOutput": writerOutput,
@@ -383,6 +430,8 @@ def agentNodePdfGenerator(state: CoverLetterState) -> dict:
 
 def buildGraph() -> StateGraph:
     def routeAfterOfferIntake(state: CoverLetterState) -> str:
+        if state.get("internshipOfferText"):
+            return "writer"
         if bool(state.get("questionAskerHasRun", False)):
             return "writer"
         return "questionAsker"

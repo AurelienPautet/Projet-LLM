@@ -11,7 +11,7 @@ from langchain_core.messages import AIMessage, SystemMessage, HumanMessage
 from langgraph.graph import StateGraph, START, END
 from langgraph.errors import GraphRecursionError
 
-from tool.tools import searchExperiences, getAllExperiences, getExperienceCount, generatePdfFromLatex, fetchWebPageContent, getPersonalInfo, getAllPersonalInfo
+from tool.tools import searchExperiences, getAllExperiences, getExperienceCount, generatePdfFromLatex, getPersonalInfo, getAllPersonalInfo, getOfferByIdRecord, updateOfferCvOutputRecord
 from graph.baseGraph import BaseState
 from llmUtils import buildChatModel, extractStructuredOutput, invokeStructuredAgent, invokeStructuredAgentWithEnforcedResponseTool, formatLlmError
 
@@ -27,6 +27,7 @@ class CVState(BaseState):
     previousAtsScore: Optional[int] = None
     internshipOfferText: Optional[str] = None
     internshipOfferSource: Optional[str] = None
+    activeOfferId: Optional[int] = None
 
 
 class CvWriterResponse(BaseModel):
@@ -45,25 +46,9 @@ class AtsReviewerResponse(BaseModel):
         description="Actionable feedback to improve ATS compatibility. This can be empty if the review failed, in which case the message field should contain an explanation.")
 
 
-class OfferIntakeResponse(BaseModel):
-    message: str = Field(
-        description="Short result message about internship offer intake.")
-    hasOffer: bool = Field(
-        description="True if an internship offer was found and captured.")
-    offerType: str = Field(
-        description="Detected offer type: none, text, or url.")
-    offerText: Optional[str] = Field(
-        default=None,
-        description="Offer content as plain text.")
-    offerSource: Optional[str] = Field(
-        default=None,
-        description="Offer source identifier or URL.")
-
-
 CV_WRITER_PROMPT = "You are an expert CV writer. Build or improve the user's CV using the available experience and personal information database. Use tools when retrieval, persistence, counting, editing, or deletion is needed. Never claim those actions succeeded unless a tool result confirms it. If a tool returns an error, do not retry in a loop. Explain the error and ask one concise next step. Ask concise clarification questions if information is missing. Retrieve personal information with getAllPersonalInfo or getPersonalInfo when needed to build the CV header and contact section. When ATS feedback is provided in context, apply it directly by rewriting the CV draft with concrete improvements using only known facts, and avoid repeating the ATS report verbatim. Never include the full CV in your user-facing message: only return the summary in the message field, and put the CV text in the cv field. You must finish by calling the response tool for the structured schema exactly once as your final action. Return structured output only."
 ATS_REVIEWER_PROMPT = "You are an ATS reviewer. Evaluate the CV draft for ATS compatibility and provide actionable feedback. If a job offer is provided in context, evaluate alignment with this offer and include concrete ATS-oriented adjustments to match keywords and requirements. Write your response in the same language as the CV content. Use tools when needed to verify experiences or retrieve missing details. Never claim tool-backed actions succeeded without tool confirmation. If a tool returns an error, do not retry in a loop. Explain the error and provide actionable next steps. You must finish by calling the response tool for the structured schema exactly once as your final action. Return structured output only."
 PDF_GENERATOR_PROMPT = "You are a PDF generation agent. You receive CV text only. Build a valid standalone one-page LaTeX CV using moderncv only: documentclass moderncv, moderncvstyle classic, moderncvcolor blue. Do not use optional icon packages or uncommon dependencies. Keep sections concise so output stays on one page. Use a safe structure only: preamble, begin document, makecvtitle, sections, end document. Use only \\section and \\cvitem for content rows. Do not use \\cventry, tabular, itemize, enumerate, custom macros, nested environments, or multiline command arguments. Escape LaTeX special characters in all text values: \\, &, %, $, #, _, {, }, ~, ^. Never include blank lines inside a command argument. Never call the PDF tool more than once. Call generatePdfFromLatex exactly once with your LaTeX and an outputName inferred from target role in kebab-case, no extension. If tool returns an error, report it clearly in one short sentence. After the tool call, provide one concise final sentence with the generated PDF path when successful. Always return a message and never leave it empty. Return structured output only. Answer as quickly as possible, do not explain your reasoning, do not reflect, just output the LaTeX and call the tool immediately."
-OFFER_INTAKE_PROMPT = "You analyze the latest user request and detect whether it contains an internship offer. If there is a URL to an offer page, call fetchWebPageContent exactly once and use the fetched content as offerText. If there is plain offer text, extract it directly as offerText. If there is no offer, set hasOffer to false and offerType to none. Keep message concise. You must finish by calling the response tool for the structured schema exactly once as your final action. Return structured output only."
 # it's high on purpose because each agent action may involve multiple tool calls, and we want to allow for some back-and-forth between the CV writer and ATS reviewer agents without hitting the limit too early.
 AGENT_RECURSION_LIMIT = int(os.getenv("AI_AGENT_RECURSION_LIMIT", "80"))
 PDF_AGENT_TIMEOUT_SECONDS = float(os.getenv("AI_PDF_TIMEOUT_SECONDS", "35"))
@@ -101,83 +86,33 @@ def buildPdfGeneratorAgent():
     )
 
 
-def buildOfferIntakeAgent():
-    model = buildChatModel()
-    return create_agent(
-        model=model,
-        tools=[fetchWebPageContent],
-        system_prompt=OFFER_INTAKE_PROMPT,
-        response_format=OfferIntakeResponse,
-    )
-
-
 cvWriterAgent = buildCvWriterAgent()
 atsReviewerAgent = buildAtsReviewerAgent()
 pdfGeneratorAgent = buildPdfGeneratorAgent()
-offerIntakeAgent = buildOfferIntakeAgent()
 
 
-def extractLatestHumanText(messages: list) -> str:
-    for message in reversed(messages):
-        if isinstance(message, HumanMessage):
-            return str(message.content or "").strip()
-    return ""
-
-
-def extractLatestUrlFromHumanMessages(messages: list) -> str:
-    for message in reversed(messages):
-        if not isinstance(message, HumanMessage):
-            continue
-        text = str(message.content or "")
-        match = re.search(r"https?://\S+", text)
-        if match:
-            return match.group(0).rstrip(".,;)")
-    return ""
-
-
-def agentNodeOffer_intake(state: CVState, config: RunnableConfig) -> dict:
+def agentNodeLoadOffer(state: CVState, config: RunnableConfig) -> dict:
+    offerId = state.get("activeOfferId")
+    if not offerId:
+        return {
+            "internshipOfferText": None,
+            "internshipOfferSource": None,
+            "status": "",
+        }
     try:
-        allMessages = list(state.get("messages") or [])
-        userText = extractLatestHumanText(allMessages)
-        latestUrl = extractLatestUrlFromHumanMessages(allMessages)
-
-        if not userText and not latestUrl:
+        dbOffer = getOfferByIdRecord(int(offerId))
+        if dbOffer is None:
             return {
+                "messages": [AIMessage(content=f"Offer id={offerId} was not found. Continuing without offer context.")],
                 "internshipOfferText": None,
                 "internshipOfferSource": None,
+                "activeOfferId": None,
                 "status": "",
             }
-
-        intakeText = userText
-        if latestUrl and latestUrl not in intakeText:
-            intakeText = f"{intakeText}\n\nPreviously shared offer URL: {latestUrl}".strip(
-            )
-
-        result = invokeStructuredAgent(
-            offerIntakeAgent,
-            {"messages": [HumanMessage(content=intakeText)]},
-            config,
-            recursionLimit=AGENT_RECURSION_LIMIT,
-        )
-        intakeOutput = extractStructuredOutput(result)
-
-        if not intakeOutput:
-            internshipOfferText = None
-            internshipOfferSource = None
-        else:
-            hasOffer = bool(intakeOutput.get("hasOffer", False))
-            internshipOfferText = str(
-                intakeOutput.get("offerText") or "").strip() if hasOffer else None
-            internshipOfferSource = str(
-                intakeOutput.get("offerSource") or "").strip() if hasOffer else None
-            if not internshipOfferText:
-                internshipOfferText = None
-            if not internshipOfferSource:
-                internshipOfferSource = None
-
         return {
-            "internshipOfferText": internshipOfferText,
-            "internshipOfferSource": internshipOfferSource,
+            "internshipOfferText": dbOffer.offerText,
+            "internshipOfferSource": dbOffer.offerSource,
+            "activeOfferId": dbOffer.id,
             "status": "",
         }
     except Exception as exc:
@@ -185,6 +120,7 @@ def agentNodeOffer_intake(state: CVState, config: RunnableConfig) -> dict:
             "messages": [AIMessage(content=formatLlmError(exc))],
             "internshipOfferText": None,
             "internshipOfferSource": None,
+            "activeOfferId": None,
             "status": "",
         }
 
@@ -235,6 +171,15 @@ def agentNodeCV_writer(state: CVState, config: RunnableConfig) -> dict:
                 "message": "I could not produce a structured CV response. Please retry.",
                 "cv": None,
             }
+        activeOfferId = state.get("activeOfferId")
+        if activeOfferId and writerOutput.get("cv"):
+            try:
+                updateOfferCvOutputRecord(
+                    offerId=int(activeOfferId),
+                    cvOutput=str(writerOutput.get("cv") or ""),
+                )
+            except Exception:
+                pass
         return {
             "messages": newMessages,
             "writerOutput": writerOutput,
@@ -451,7 +396,7 @@ def buildGraph() -> StateGraph:
         if "could not produce a structured ats response" in messageText:
             return "human"
         maxImprovementCycles = int(
-            os.getenv("ATS_MAX_IMPROVEMENT_CYCLES", "2"))
+            os.getenv("ATS_MAX_IMPROVEMENT_CYCLES", "4"))
         previousAtsScore = state.get("previousAtsScore")
         iterationCount = int(state.get("atsIterationCount", 0) or 0)
         try:
@@ -467,7 +412,7 @@ def buildGraph() -> StateGraph:
         return "pdfGenerator"
 
     graph = StateGraph(CVState)
-    graph.add_node("agentNodeOffer_intake", agentNodeOffer_intake)
+    graph.add_node("agentNodeLoadOffer", agentNodeLoadOffer)
     graph.add_node("agentNodeCV_writer", agentNodeCV_writer)
     graph.add_node("agentNodeATS_reviewer", agentNodeATS_reviewer)
     graph.add_node("edgeNodeCvWriterToAtsReviewer",
@@ -477,8 +422,8 @@ def buildGraph() -> StateGraph:
     graph.add_node("edgeNodeAtsReviewerToPdfGenerator",
                    edgeNodeAtsReviewerToPdfGenerator)
     graph.add_node("agentNodePdf_Generator", agentNodePdf_Generator)
-    graph.add_edge(START, "agentNodeOffer_intake")
-    graph.add_edge("agentNodeOffer_intake", "agentNodeCV_writer")
+    graph.add_edge(START, "agentNodeLoadOffer")
+    graph.add_edge("agentNodeLoadOffer", "agentNodeCV_writer")
     graph.add_conditional_edges(
         "agentNodeCV_writer",
         routeAfterCvWriter,
