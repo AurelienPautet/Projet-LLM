@@ -22,7 +22,7 @@ def main():
             "What do you want to do?",
             choices=[
                 "Add/modify a professional experience",
-                "Create a cv for a specific job offer (not implemented yet)",
+                "Create a cv for a specific job offer",
                 "Quit",
             ]
         ).ask()
@@ -34,7 +34,7 @@ def main():
         if category == "Add/modify a professional experience":
             runGraph(career_graph, {"messages": [],
                      "status": ""}, agentName="Experience manager")
-        elif category == "Create a cv for a specific job offer (not implemented yet)":
+        elif category == "Create a cv for a specific job offer":
             runGraph(cv_graph, {"messages": [], "status": ""},
                      agentName="CV manager")
 

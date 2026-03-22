@@ -1,4 +1,4 @@
-from db.db import resetDbAndTables
+from db import resetDbAndTables
 import sys
 import os
 

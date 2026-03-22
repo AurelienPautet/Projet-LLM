@@ -46,6 +46,23 @@ class ExperienceResult(ExperienceBase):
     id: int
 
 
+class PersonalInfoBase(SQLModel):
+    fieldName: str = Field(
+        description="the personal information field name, e.g., 'email', 'phone', 'linkedin', 'summary'"
+    )
+    fieldValue: str = Field(
+        description="the value of the personal information field"
+    )
+
+
+class PersonalInfo(PersonalInfoBase, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+
+
+class PersonalInfoResult(PersonalInfoBase):
+    id: int
+
+
 DATABASE_URL = os.getenv(
     "DATABASE_URL", "postgresql+psycopg://postgres:postgres@db:5432/career-goat")
 engine = create_engine(DATABASE_URL)

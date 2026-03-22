@@ -28,13 +28,16 @@ def schemaToEmbeddingText(obj: BaseModel) -> str:
     return "\n".join(lines)
 
 
-def buildChatModel() -> ChatOpenAI:
+def buildChatModel(timeoutSeconds: float | None = None, maxRetries: int | None = None) -> ChatOpenAI:
+    resolvedTimeout = timeoutSeconds if timeoutSeconds is not None else float(
+        os.getenv("AI_TIMEOUT_SECONDS", "120"))
+    resolvedRetries = maxRetries if maxRetries is not None else AI_CLIENT_MAX_RETRIES
     return ChatOpenAI(
         model=os.getenv("AI_MODEL"),
         base_url=os.getenv("AI_ENDPOINT"),
         api_key=os.getenv("AI_API_KEY"),
-        timeout=float(os.getenv("AI_TIMEOUT_SECONDS", "120")),
-        max_retries=AI_CLIENT_MAX_RETRIES,
+        timeout=resolvedTimeout,
+        max_retries=resolvedRetries,
     )
 
 

@@ -58,12 +58,6 @@ def runGraph(graph, initial_state: dict, agentName: str = "Assistant"):
             statusIndicator = None
         lastStatusText = ""
 
-    def emitStatusLine(text: str):
-        nonlocal lastStatusText
-        if text and text != lastStatusText:
-            console.print(f"[dim]{text}[/dim]")
-            lastStatusText = text
-
     def toText(content: object) -> str:
         if isinstance(content, str):
             return content
@@ -231,11 +225,13 @@ def runGraph(graph, initial_state: dict, agentName: str = "Assistant"):
         hasToolMessages = any(isinstance(msg, ToolMessage) for msg in messages)
 
         if SHOW_TOOL_ACTIVITY and (effectiveNodeName == "tools" or effectiveNodeName == "toolNode"):
-            setStatus("Running tools...")
+            setStatus("Running tool...")
+        elif SHOW_TOOL_ACTIVITY and hasToolCalls:
+            setStatus("Running tool...")
         elif hasToolMessages and lastToolHadError:
             setStatus("Handling error...")
         elif SHOW_TOOL_ACTIVITY and (hasToolMessages or effectiveNodeName == "agent" or "agentNode" in effectiveNodeName or effectiveNodeName == "model"):
-            setStatus("Analysing tool output...")
+            setStatus("Evaluating tool output...")
 
         if hasToolMessages:
             toolMessages = [
@@ -244,39 +240,52 @@ def runGraph(graph, initial_state: dict, agentName: str = "Assistant"):
             if lastToolHadError:
                 setStatus("Handling error...")
             elif SHOW_TOOL_ACTIVITY:
-                setStatus("Analysing tool output...")
-                emitStatusLine("Analysing tool output...")
+                setStatus("Evaluating tool output...")
 
         if "agentNode" in effectiveNodeName or effectiveNodeName == "agent" or effectiveNodeName == "model":
             # Add filtering so we don't re-print the same AI Messages
             aiMessages = [
                 msg for msg in aiMessages if getattr(msg, "id", None) not in seenMessageIds
             ]
+            suppressNestedPdfModelOutput = (
+                parentNodeName == "agentNodePdf_Generator" and nodeName in (
+                    "agent", "model")
+            )
             if aiMessages:
                 structuredMessage = ""
                 if showStructuredOutput:
                     payload = toStructuredPayload(structuredResponse)
                     structuredMessage = str(payload.get("message", "")).strip()
+                suppressRawAiText = showStructuredOutput and not DEBUG
 
-                for msg in aiMessages[:-1]:
-                    msgText = toText(getattr(msg, "content", "")).strip()
-                    if msgText or getattr(msg, "tool_calls", None):
-                        printAgentOutput(effectiveNodeName,
-                                         msg, parentNodeName)
+                if not suppressNestedPdfModelOutput:
+                    for msg in aiMessages[:-1]:
+                        msgText = toText(getattr(msg, "content", "")).strip()
+                        if suppressRawAiText:
+                            if getattr(msg, "tool_calls", None):
+                                printToolCalls(msg)
+                            continue
+                        if msgText or getattr(msg, "tool_calls", None):
+                            printAgentOutput(effectiveNodeName,
+                                             msg, parentNodeName)
 
-                lastAi = aiMessages[-1]
-                lastText = toText(getattr(lastAi, "content", "")).strip()
-                if DEBUG:
-                    printAgentOutput(effectiveNodeName, lastAi, parentNodeName)
-                else:
-                    if lastText.startswith("LLM error:"):
+                    lastAi = aiMessages[-1]
+                    lastText = toText(getattr(lastAi, "content", "")).strip()
+                    if DEBUG:
                         printAgentOutput(effectiveNodeName,
                                          lastAi, parentNodeName)
-                    elif lastText and lastText != structuredMessage:
-                        printAgentOutput(effectiveNodeName,
-                                         lastAi, parentNodeName)
-                    elif getattr(lastAi, "tool_calls", None):
-                        printToolCalls(lastAi)
+                    else:
+                        if suppressRawAiText:
+                            if getattr(lastAi, "tool_calls", None):
+                                printToolCalls(lastAi)
+                        elif lastText.startswith("LLM error:"):
+                            printAgentOutput(effectiveNodeName,
+                                             lastAi, parentNodeName)
+                        elif lastText and lastText != structuredMessage:
+                            printAgentOutput(effectiveNodeName,
+                                             lastAi, parentNodeName)
+                        elif getattr(lastAi, "tool_calls", None):
+                            printToolCalls(lastAi)
 
         if showStructuredOutput:
             if DEBUG:
@@ -285,10 +294,6 @@ def runGraph(graph, initial_state: dict, agentName: str = "Assistant"):
             else:
                 printStructuredMessage(
                     effectiveNodeName, structuredResponse, parentNodeName)
-
-        if hasToolCalls and DEBUG and SHOW_TOOL_ACTIVITY:
-            setStatus("Running tools...")
-            emitStatusLine("Running tools...")
 
         return messages
 
