@@ -1,6 +1,7 @@
 from langchain_core.runnables import RunnableConfig
 import json
 import os
+import re
 from typing import Optional
 
 from dotenv import load_dotenv
@@ -12,7 +13,7 @@ from langgraph.errors import GraphRecursionError
 
 from tool.tools import searchExperiences, getAllExperiences, getExperienceCount, generatePdfFromLatex, fetchWebPageContent, getPersonalInfo, getAllPersonalInfo
 from graph.baseGraph import BaseState
-from llmUtils import buildChatModel
+from llmUtils import buildChatModel, extractStructuredOutput, invokeStructuredAgent, invokeStructuredAgentWithEnforcedResponseTool, formatLlmError
 
 load_dotenv()
 
@@ -70,50 +71,6 @@ PDF_AGENT_MAX_RETRIES = int(os.getenv("AI_PDF_MAX_RETRIES", "1"))
 PDF_AGENT_RECURSION_LIMIT = int(os.getenv("AI_PDF_AGENT_RECURSION_LIMIT", "6"))
 
 
-def toDict(value):
-    if hasattr(value, "model_dump"):
-        return value.model_dump()
-    if isinstance(value, dict):
-        return value
-    return {"message": str(value)}
-
-
-def extractStructuredOutput(result: dict) -> dict:
-    structured = result.get("structured_response")
-    if structured is None:
-        return {}
-    return toDict(structured)
-
-
-def invokeStructuredAgent(agent, inputPayload: dict, config: dict = None) -> dict:
-    cfg = dict(config) if config else {}
-    cfg.setdefault("recursion_limit", AGENT_RECURSION_LIMIT)
-    return agent.invoke(inputPayload, config=cfg)
-
-
-def invokeStructuredAgentWithEnforcedResponseTool(agent, inputMessages: list, config: RunnableConfig, schemaName: str) -> dict:
-    result = invokeStructuredAgent(agent, {"messages": inputMessages}, config)
-    structured = extractStructuredOutput(result)
-    if structured:
-        return result
-    enforcementMessage = SystemMessage(
-        content=(
-            f"Your previous turn did not include the final structured response tool call. "
-            f"Retry now and finish by calling {schemaName} exactly once as the final action."
-        )
-    )
-    enforcedMessages = [enforcementMessage] + list(inputMessages)
-    return invokeStructuredAgent(agent, {"messages": enforcedMessages}, config)
-
-
-def formatLlmError(error: Exception) -> str:
-    text = str(error)
-    lowered = text.lower()
-    if "429" in text or "rate-limit" in lowered or "rate limited" in lowered or "temporarily rate-limited" in lowered:
-        return "The current model provider is rate-limited right now. Please retry in a few seconds."
-    return f"LLM error: {text}"
-
-
 def buildCvWriterAgent():
     model = buildChatModel()
     return create_agent(
@@ -167,20 +124,40 @@ def extractLatestHumanText(messages: list) -> str:
     return ""
 
 
+def extractLatestUrlFromHumanMessages(messages: list) -> str:
+    for message in reversed(messages):
+        if not isinstance(message, HumanMessage):
+            continue
+        text = str(message.content or "")
+        match = re.search(r"https?://\S+", text)
+        if match:
+            return match.group(0).rstrip(".,;)")
+    return ""
+
+
 def agentNodeOffer_intake(state: CVState, config: RunnableConfig) -> dict:
     try:
-        userText = extractLatestHumanText(list(state.get("messages") or []))
-        if not userText:
+        allMessages = list(state.get("messages") or [])
+        userText = extractLatestHumanText(allMessages)
+        latestUrl = extractLatestUrlFromHumanMessages(allMessages)
+
+        if not userText and not latestUrl:
             return {
                 "internshipOfferText": None,
                 "internshipOfferSource": None,
                 "status": "",
             }
 
+        intakeText = userText
+        if latestUrl and latestUrl not in intakeText:
+            intakeText = f"{intakeText}\n\nPreviously shared offer URL: {latestUrl}".strip(
+            )
+
         result = invokeStructuredAgent(
             offerIntakeAgent,
-            {"messages": [HumanMessage(content=userText)]},
+            {"messages": [HumanMessage(content=intakeText)]},
             config,
+            recursionLimit=AGENT_RECURSION_LIMIT,
         )
         intakeOutput = extractStructuredOutput(result)
 
@@ -244,7 +221,12 @@ def agentNodeCV_writer(state: CVState, config: RunnableConfig) -> dict:
             )
             writerMessages = [revisionContext] + writerMessages
         result = invokeStructuredAgentWithEnforcedResponseTool(
-            cvWriterAgent, writerMessages, config, "CvWriterResponse")
+            cvWriterAgent,
+            writerMessages,
+            config,
+            "CvWriterResponse",
+            recursionLimit=AGENT_RECURSION_LIMIT,
+        )
         allMessages = result.get("messages", [])
         newMessages = allMessages[-1:] if allMessages else []
         writerOutput = extractStructuredOutput(result)
@@ -320,7 +302,12 @@ def agentNodeATS_reviewer(state: CVState, config: RunnableConfig) -> dict:
             inputMessages = [SystemMessage(
                 content="\n\n".join(offerContextParts))] + inputMessages
         result = invokeStructuredAgentWithEnforcedResponseTool(
-            atsReviewerAgent, inputMessages, config, "AtsReviewerResponse")
+            atsReviewerAgent,
+            inputMessages,
+            config,
+            "AtsReviewerResponse",
+            recursionLimit=AGENT_RECURSION_LIMIT,
+        )
         allMessages = result.get("messages", [])
         newMessages = allMessages[-1:] if allMessages else []
         reviewerOutput = extractStructuredOutput(result)
@@ -414,6 +401,7 @@ def agentNodePdf_Generator(state: CVState) -> dict:
                 pdfGeneratorAgent,
                 {"messages": [generatorContext]},
                 {"recursion_limit": PDF_AGENT_RECURSION_LIMIT},
+                recursionLimit=PDF_AGENT_RECURSION_LIMIT,
             )
             allMessages = result.get("messages", [])
             newMessages = allMessages[-1:] if allMessages else []

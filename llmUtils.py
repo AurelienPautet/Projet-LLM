@@ -2,6 +2,8 @@ import os
 import time
 
 from dotenv import load_dotenv
+from langchain_core.messages import SystemMessage
+from langchain_core.runnables import RunnableConfig
 from langchain_core.messages import AIMessage
 from langchain_openai import ChatOpenAI
 from rich.console import Console
@@ -69,3 +71,57 @@ def invokeAgentWithRetries(model: ChatOpenAI, systemPrompt: str, messages: list,
         if schema or not responseIsEmpty(response):
             return response
     return response
+
+
+def toDict(value):
+    if hasattr(value, "model_dump"):
+        return value.model_dump()
+    if isinstance(value, dict):
+        return value
+    return {"message": str(value)}
+
+
+def extractStructuredOutput(result: dict) -> dict:
+    structured = result.get("structured_response")
+    if structured is None:
+        return {}
+    return toDict(structured)
+
+
+def invokeStructuredAgent(agent, inputPayload: dict, config: RunnableConfig | dict | None = None, recursionLimit: int = 80) -> dict:
+    cfg = dict(config) if config else {}
+    cfg.setdefault("recursion_limit", recursionLimit)
+    return agent.invoke(inputPayload, config=cfg)
+
+
+def invokeStructuredAgentWithEnforcedResponseTool(agent, inputMessages: list, config: RunnableConfig | dict | None, schemaName: str, recursionLimit: int = 80) -> dict:
+    result = invokeStructuredAgent(
+        agent,
+        {"messages": inputMessages},
+        config,
+        recursionLimit=recursionLimit,
+    )
+    structured = extractStructuredOutput(result)
+    if structured:
+        return result
+    enforcementMessage = SystemMessage(
+        content=(
+            f"Your previous turn did not include the final structured response tool call. "
+            f"Retry now and finish by calling {schemaName} exactly once as the final action."
+        )
+    )
+    enforcedMessages = [enforcementMessage] + list(inputMessages)
+    return invokeStructuredAgent(
+        agent,
+        {"messages": enforcedMessages},
+        config,
+        recursionLimit=recursionLimit,
+    )
+
+
+def formatLlmError(error: Exception) -> str:
+    text = str(error)
+    lowered = text.lower()
+    if "429" in text or "rate-limit" in lowered or "rate limited" in lowered or "temporarily rate-limited" in lowered:
+        return "The current model provider is rate-limited right now. Please retry in a few seconds."
+    return f"LLM error: {text}"

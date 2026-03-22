@@ -35,6 +35,11 @@ def runGraph(graph, initial_state: dict, agentName: str = "Assistant"):
     lastPrintedText = ""
 
     history = list(initial_state.get("messages", []))
+    persistentState = {
+        key: value
+        for key, value in initial_state.items()
+        if key != "messages" and key.endswith("HasRun") and isinstance(value, bool)
+    }
     seenMessageIds = {
         getattr(message, "id", None)
         for message in history
@@ -321,7 +326,10 @@ def runGraph(graph, initial_state: dict, agentName: str = "Assistant"):
         history.append(userMessage)
         setStatus("Thinking...")
 
-        for event in graph.stream({"messages": history}, stream_mode="updates", subgraphs=True):
+        streamInput = {"messages": history}
+        streamInput.update(persistentState)
+
+        for event in graph.stream(streamInput, stream_mode="updates", subgraphs=True):
             parentNodeName = None
             if isinstance(event, tuple) and len(event) == 2:
                 path, updates = event
@@ -331,6 +339,16 @@ def runGraph(graph, initial_state: dict, agentName: str = "Assistant"):
                         parentNodeName = lastPathItem.split(":", 1)[0]
             else:
                 updates = event
+
+            if updates:
+                nodeName = next(iter(updates))
+                nodeData = updates[nodeName]
+                for key, value in nodeData.items():
+                    if key == "messages":
+                        continue
+                    if key.endswith("HasRun") and isinstance(value, bool):
+                        persistentState[key] = value
+
             newMessages = processUpdates(
                 updates, parentNodeName=parentNodeName)
             if not newMessages:

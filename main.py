@@ -5,6 +5,7 @@ from rich.rule import Rule
 
 from graph.experienceGraph import career_graph
 from graph.cvGraph import cv_graph
+from graph.coverLetterGraph import coverLetterGraph
 from graph.baseGraph import runGraph
 
 
@@ -23,6 +24,7 @@ def main():
             choices=[
                 "Add/modify a professional experience",
                 "Create a cv for a specific job offer",
+                "Create a cover letter for a specific job offer",
                 "Quit",
             ]
         ).ask()
@@ -37,6 +39,9 @@ def main():
         elif category == "Create a cv for a specific job offer":
             runGraph(cv_graph, {"messages": [], "status": ""},
                      agentName="CV manager")
+        elif category == "Create a cover letter for a specific job offer":
+            runGraph(coverLetterGraph, {"messages": [], "status": ""},
+                     agentName="Cover letter manager")
 
 
 if __name__ == "__main__":
