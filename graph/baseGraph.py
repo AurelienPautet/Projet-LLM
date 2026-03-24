@@ -1,10 +1,9 @@
-from typing import Annotated, Any
+from typing import Any
 
 from langchain_core.messages import AIMessage, ToolMessage, BaseMessage, HumanMessage
-from langgraph.graph.message import add_messages
 from langgraph.graph import MessagesState
 from pydantic import BaseModel
-from IPython.display import Image, display
+import os
 
 
 class BaseState(MessagesState):
@@ -16,17 +15,10 @@ def runGraph(graph, initial_state: dict, agentName: str = "Assistant", firstQues
     from rich.markdown import Markdown
     from rich.rule import Rule
     from rich.prompt import Prompt
-    import os
     import json
 
     console = Console()
     DEBUG = os.getenv("DEBUG", "false").lower() == "true"
-    SHOW_TOOL_ACTIVITY = os.getenv(
-        "SHOW_TOOL_ACTIVITY", "true").lower() == "true"
-    SHOW_FULL_TOOL_ARGUMENTS = os.getenv(
-        "SHOW_FULL_TOOL_ARGUMENTS", "false").lower() == "true"
-    TOOL_ARGUMENT_PREVIEW_LENGTH = int(
-        os.getenv("TOOL_ARGUMENT_PREVIEW_LENGTH", "40"))
     hadError = False
     statusIndicator = None
     lastToolHadError = False
@@ -72,15 +64,11 @@ def runGraph(graph, initial_state: dict, agentName: str = "Assistant", firstQues
 
     def formatToolArgValue(value: object) -> str:
         text = repr(value)
-        if SHOW_FULL_TOOL_ARGUMENTS:
+        if len(text) <= 40:
             return text
-        if len(text) <= TOOL_ARGUMENT_PREVIEW_LENGTH:
-            return text
-        return f"{text[:TOOL_ARGUMENT_PREVIEW_LENGTH]}..."
+        return f"{text[:40]}..."
 
     def printToolCalls(message):
-        if not SHOW_TOOL_ACTIVITY:
-            return
         toolCalls = getattr(message, "tool_calls", None)
         if not toolCalls:
             return
@@ -91,11 +79,10 @@ def runGraph(graph, initial_state: dict, agentName: str = "Assistant", firstQues
                 f"\n[bold green]Tool:[/bold green] {tc['name']}({args})")
 
     def resolveDisplayName(nodeName: str, parentNodeName: str | None = None) -> str:
-        resolvedNodeName = nodeName
         if nodeName in ("agent", "model") and parentNodeName:
-            resolvedNodeName = parentNodeName
-        name = resolvedNodeName.replace("agentNode", "").replace("_", " ")
-        if resolvedNodeName in ("agent", "model"):
+            nodeName = parentNodeName
+        name = nodeName.replace("agentNode", "").replace("_", " ")
+        if nodeName in ("agent", "model"):
             name = agentName
         return name
 
@@ -173,7 +160,7 @@ def runGraph(graph, initial_state: dict, agentName: str = "Assistant", firstQues
                     clearStatus()
                     console.print(
                         Markdown(f"**Tool error:** {msg.content}"), style="red")
-                if DEBUG and SHOW_TOOL_ACTIVITY:
+                if DEBUG:
                     clearStatus()
                     console.print(
                         f"[bold orange_red1]Tool output:[/bold orange_red1] {msg.content}")
@@ -224,13 +211,13 @@ def runGraph(graph, initial_state: dict, agentName: str = "Assistant", firstQues
                            for msg in messages)
         hasToolMessages = any(isinstance(msg, ToolMessage) for msg in messages)
 
-        if SHOW_TOOL_ACTIVITY and (effectiveNodeName == "tools" or effectiveNodeName == "toolNode"):
+        if effectiveNodeName == "tools" or effectiveNodeName == "toolNode":
             setStatus("Running tool...")
-        elif SHOW_TOOL_ACTIVITY and hasToolCalls:
+        elif hasToolCalls:
             setStatus("Running tool...")
         elif hasToolMessages and lastToolHadError:
             setStatus("Handling error...")
-        elif SHOW_TOOL_ACTIVITY and (hasToolMessages or effectiveNodeName == "agent" or "agentNode" in effectiveNodeName or effectiveNodeName == "model"):
+        elif hasToolMessages or effectiveNodeName == "agent" or "agentNode" in effectiveNodeName or effectiveNodeName == "model":
             setStatus("Evaluating tool output...")
 
         if hasToolMessages:
@@ -239,11 +226,10 @@ def runGraph(graph, initial_state: dict, agentName: str = "Assistant", firstQues
             printToolOutput(toolMessages)
             if lastToolHadError:
                 setStatus("Handling error...")
-            elif SHOW_TOOL_ACTIVITY:
+            else:
                 setStatus("Evaluating tool output...")
 
         if "agentNode" in effectiveNodeName or effectiveNodeName == "agent" or effectiveNodeName == "model":
-            # Add filtering so we don't re-print the same AI Messages
             aiMessages = [
                 msg for msg in aiMessages if getattr(msg, "id", None) not in seenMessageIds
             ]
@@ -381,7 +367,3 @@ def runGraph(graph, initial_state: dict, agentName: str = "Assistant", firstQues
 
     clearStatus()
     return history
-
-
-def drawGraph(graph):
-    display(Image(graph.get_graph().draw_mermaid_png()))

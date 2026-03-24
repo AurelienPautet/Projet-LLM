@@ -16,105 +16,48 @@ class ExperienceType(str, Enum):
     PROJECT = "project"
 
 
-class OfferStatus(str, Enum):
-    OFFER_COLLECTED = "offer_collected"
-    CV_GENERATED = "cv_generated"
-    COVER_LETTER_GENERATED = "cover_letter_generated"
-    COMPLETED = "completed"
-
-
 class ExperienceBase(SQLModel):
-    title: str = Field(
-        description="the title of the experience, e.g., 'Software Engineer Intern'")
-    kind: Optional[ExperienceType] = Field(
-        description="the kind of experience, e.g., 'professional', 'educational', 'project'")
-    description: str = Field(
-        description="a detailed description of the experience, including responsibilities and achievements")
-    technos: Optional[List[str]] = Field(sa_column=Column(ARRAY(
-        String)), description="a list of technologies used during the experience, e.g., ['Python', 'Django', 'PostgreSQL']")
-    start_date: Optional[date] = Field(
-        description="the start date of the experience")
-    end_date: Optional[date] = Field(
-        description="the end date of the experience")
-    company_or_institution: Optional[str] = Field(
-        description="the company or institution where the experience was gained")
-    location: Optional[str] = Field(
-        description="the location of the experience, e.g., 'Paris, France'")
+    title: str = Field(description="the title of the experience, e.g., 'Software Engineer Intern'")
+    kind: Optional[ExperienceType] = Field(description="the kind of experience, e.g., 'professional', 'educational', 'project'")
+    description: str = Field(description="a detailed description of the experience, including responsibilities and achievements")
+    technos: Optional[List[str]] = Field(sa_column=Column(ARRAY(String)), description="a list of technologies used during the experience, e.g., ['Python', 'Django', 'PostgreSQL']")
+    start_date: Optional[date] = Field(description="the start date of the experience")
+    end_date: Optional[date] = Field(description="the end date of the experience")
+    company_or_institution: Optional[str] = Field(description="the company or institution where the experience was gained")
+    location: Optional[str] = Field(description="the location of the experience, e.g., 'Paris, France'")
 
 
 class Experience(ExperienceBase, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
-    embedding: Optional[List[float]] = Field(
-        default=None, sa_column=Column(Vector(3072))
-    )
-
-
-class ExperienceResult(ExperienceBase):
-    id: int
+    embedding: Optional[List[float]] = Field(default=None, sa_column=Column(Vector(3072)))
 
 
 class PersonalInfoBase(SQLModel):
-    fieldName: str = Field(
-        description="the personal information field name, e.g., 'email', 'phone', 'linkedin', 'summary'"
-    )
-    fieldValue: str = Field(
-        description="the value of the personal information field"
-    )
+    fieldName: str = Field(description="the personal information field name, e.g., 'email', 'phone', 'linkedin', 'summary'")
+    fieldValue: str = Field(description="the value of the personal information field")
 
 
 class PersonalInfo(PersonalInfoBase, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
 
 
-class PersonalInfoResult(PersonalInfoBase):
-    id: int
-
-
 class OfferBase(SQLModel):
     offerText: str = Field(description="the internship/job offer text content")
-    offerSource: Optional[str] = Field(
-        default=None,
-        description="the source URL or origin of the offer"
-    )
-    cvOutput: Optional[str] = Field(
-        default=None,
-        description="the generated CV output associated with this offer"
-    )
-    coverLetterOutput: Optional[str] = Field(
-        default=None,
-        description="the generated cover letter output associated with this offer"
-    )
-    status: OfferStatus = Field(
-        default=OfferStatus.OFFER_COLLECTED,
-        description="current workflow status for this offer"
-    )
-    cvVersion: int = Field(
-        default=0,
-        description="current version of the generated CV"
-    )
-    coverLetterVersion: int = Field(
-        default=0,
-        description="current version of the generated cover letter"
-    )
+    offerSource: Optional[str] = Field(default=None, description="the source URL or origin of the offer")
+    cvOutput: Optional[str] = Field(default=None, description="the generated CV output associated with this offer")
+    coverLetterOutput: Optional[str] = Field(default=None, description="the generated cover letter output associated with this offer")
+    cvVersion: int = Field(default=0, description="current version of the generated CV")
+    coverLetterVersion: int = Field(default=0, description="current version of the generated cover letter")
 
 
 class Offer(OfferBase, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
-    embedding: Optional[List[float]] = Field(
-        default=None, sa_column=Column(Vector(3072))
-    )
+    embedding: Optional[List[float]] = Field(default=None, sa_column=Column(Vector(3072)))
     createdAt: datetime = Field(default_factory=datetime.utcnow)
     updatedAt: datetime = Field(default_factory=datetime.utcnow)
 
 
-class OfferResult(OfferBase):
-    id: int
-    createdAt: datetime
-    updatedAt: datetime
-
-
-DATABASE_URL = os.getenv(
-    "DATABASE_URL", "postgresql+psycopg://postgres:postgres@db:5432/career-goat")
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql+psycopg://postgres:postgres@db:5432/career-goat")
 engine = create_engine(DATABASE_URL)
 
 

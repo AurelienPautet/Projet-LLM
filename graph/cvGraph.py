@@ -1,21 +1,22 @@
 from langchain_core.runnables import RunnableConfig
 import json
-import os
-import re
 from typing import Optional
 
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 from langchain.agents import create_agent
-from langchain_core.messages import AIMessage, SystemMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.graph import StateGraph, START, END
-from langgraph.errors import GraphRecursionError
 
-from tool.tools import searchExperiences, getAllExperiences, getExperienceCount, generatePdfFromLatex, getPersonalInfo, getAllPersonalInfo, getOfferByIdRecord, updateOfferCvOutputRecord
+from tool.tools import searchExperiences, getAllExperiences, getExperienceCount, generatePdfFromLatex, getPersonalInfo, getAllPersonalInfo, getOfferById, updateOfferCvOutput
 from graph.baseGraph import BaseState
-from llmUtils import buildChatModel, extractStructuredOutput, invokeStructuredAgent, invokeStructuredAgentWithEnforcedResponseTool, formatLlmError
+from llmUtils import buildChatModel, extractStructuredOutput, invokeStructuredAgent, invokeStructuredAgentWithEnforcedResponseTool, formatLlmError, handleNodeError
 
 load_dotenv()
+
+AGENT_RECURSION_LIMIT = 80
+PDF_AGENT_RECURSION_LIMIT = 6
+ATS_MAX_IMPROVEMENT_CYCLES = 4
 
 
 class CVState(BaseState):
@@ -49,11 +50,6 @@ class AtsReviewerResponse(BaseModel):
 CV_WRITER_PROMPT = "You are an expert CV writer. Build or improve the user's CV using the available experience and personal information database. Use tools when retrieval, persistence, counting, editing, or deletion is needed. Never claim those actions succeeded unless a tool result confirms it. If a tool returns an error, do not retry in a loop. Explain the error and ask one concise next step. Ask concise clarification questions if information is missing. Retrieve personal information with getAllPersonalInfo or getPersonalInfo when needed to build the CV header and contact section. When ATS feedback is provided in context, apply it directly by rewriting the CV draft with concrete improvements using only known facts, and avoid repeating the ATS report verbatim. Never include the full CV in your user-facing message: only return the summary in the message field, and put the CV text in the cv field. You must finish by calling the response tool for the structured schema exactly once as your final action. Return structured output only."
 ATS_REVIEWER_PROMPT = "You are an ATS reviewer. Evaluate the CV draft for ATS compatibility and provide actionable feedback. If a job offer is provided in context, evaluate alignment with this offer and include concrete ATS-oriented adjustments to match keywords and requirements. Write your response in the same language as the CV content. Use tools when needed to verify experiences or retrieve missing details. Never claim tool-backed actions succeeded without tool confirmation. If a tool returns an error, do not retry in a loop. Explain the error and provide actionable next steps. You must finish by calling the response tool for the structured schema exactly once as your final action. Return structured output only."
 PDF_GENERATOR_PROMPT = "You are a PDF generation agent. You receive CV text only. Build a valid standalone one-page LaTeX CV using moderncv only: documentclass moderncv, moderncvstyle classic, moderncvcolor blue. Do not use optional icon packages or uncommon dependencies. Keep sections concise so output stays on one page. Use a safe structure only: preamble, begin document, makecvtitle, sections, end document. Use only \\section and \\cvitem for content rows. Do not use \\cventry, tabular, itemize, enumerate, custom macros, nested environments, or multiline command arguments. Escape LaTeX special characters in all text values: \\, &, %, $, #, _, {, }, ~, ^. Never include blank lines inside a command argument. Never call the PDF tool more than once. Call generatePdfFromLatex exactly once with the requested `outputName`. If tool returns an error, report it clearly in one short sentence. After the tool call, provide one concise final sentence with the generated PDF path when successful. Always return a message and never leave it empty. Return structured output only. Answer as quickly as possible, do not explain your reasoning, do not reflect, just output the LaTeX and call the tool immediately."
-# it's high on purpose because each agent action may involve multiple tool calls, and we want to allow for some back-and-forth between the CV writer and ATS reviewer agents without hitting the limit too early.
-AGENT_RECURSION_LIMIT = int(os.getenv("AI_AGENT_RECURSION_LIMIT", "80"))
-PDF_AGENT_TIMEOUT_SECONDS = float(os.getenv("AI_PDF_TIMEOUT_SECONDS", "35"))
-PDF_AGENT_MAX_RETRIES = int(os.getenv("AI_PDF_MAX_RETRIES", "1"))
-PDF_AGENT_RECURSION_LIMIT = int(os.getenv("AI_PDF_AGENT_RECURSION_LIMIT", "6"))
 
 
 def buildCvWriterAgent():
@@ -91,7 +87,7 @@ atsReviewerAgent = buildAtsReviewerAgent()
 pdfGeneratorAgent = buildPdfGeneratorAgent()
 
 
-def agentNodeLoadOffer(state: CVState, config: RunnableConfig) -> dict:
+def agentNodeLoad_Offer(state: CVState, config: RunnableConfig) -> dict:
     offerId = state.get("activeOfferId")
     if not offerId:
         return {
@@ -100,7 +96,7 @@ def agentNodeLoadOffer(state: CVState, config: RunnableConfig) -> dict:
             "status": "",
         }
     try:
-        dbOffer = getOfferByIdRecord(int(offerId))
+        dbOffer = getOfferById(int(offerId))
         if dbOffer is None:
             return {
                 "messages": [AIMessage(content=f"Offer id={offerId} was not found. Continuing without offer context.")],
@@ -125,25 +121,30 @@ def agentNodeLoadOffer(state: CVState, config: RunnableConfig) -> dict:
         }
 
 
-def agentNodeCV_writer(state: CVState, config: RunnableConfig) -> dict:
+def buildOfferContext(offerText: str, offerSource: str, intro: str) -> str:
+    parts = [intro]
+    if offerSource:
+        parts.append(f"Source: {offerSource}")
+    parts.append(f"Offer content:\n{offerText}")
+    return "\n\n[CONTEXT: JOB OFFER]\n" + "\n\n".join(parts) + "\n[/CONTEXT]"
+
+
+def appendToLastMessage(messages: list, extra: str) -> list:
+    if messages and isinstance(messages[-1], HumanMessage):
+        messages[-1] = HumanMessage(content=str(messages[-1].content) + extra)
+    else:
+        messages.append(HumanMessage(content=extra))
+    return messages
+
+
+def agentNodeCV_Writer(state: CVState, config: RunnableConfig) -> dict:
     try:
-        inputMessages = state["messages"]
-        writerMessages = list(inputMessages)
-        internshipOfferText = str(
-            state.get("internshipOfferText") or "").strip()
-        internshipOfferSource = str(
-            state.get("internshipOfferSource") or "").strip()
+        writerMessages = list(state["messages"])
+        internshipOfferText = str(state.get("internshipOfferText") or "").strip()
+        internshipOfferSource = str(state.get("internshipOfferSource") or "").strip()
         if internshipOfferText:
-            offerContextParts = [
-                "A job offer is provided below. Tailor the CV to this offer while staying truthful to known experiences."]
-            if internshipOfferSource:
-                offerContextParts.append(f"Source: {internshipOfferSource}")
-            offerContextParts.append(f"Offer content:\n{internshipOfferText}")
-            offer_str = "\n\n[CONTEXT: JOB OFFER]\n" + "\n\n".join(offerContextParts) + "\n[/CONTEXT]"
-            if writerMessages and isinstance(writerMessages[-1], HumanMessage):
-                writerMessages[-1] = HumanMessage(content=str(writerMessages[-1].content) + offer_str)
-            else:
-                writerMessages.append(HumanMessage(content=offer_str))
+            offerStr = buildOfferContext(internshipOfferText, internshipOfferSource, "A job offer is provided below. Tailor the CV to this offer while staying truthful to known experiences.")
+            writerMessages = appendToLastMessage(writerMessages, offerStr)
         reviewerOutput = state.get("reviewerOutput") or {}
         try:
             reviewerAts = int(reviewerOutput.get("ats", 0) or 0)
@@ -158,10 +159,7 @@ def agentNodeCV_writer(state: CVState, config: RunnableConfig) -> dict:
                 f"ATS reviewer output JSON:\n{json.dumps(reviewerOutput, ensure_ascii=True)}"
                 "\n[/ATS REVIEW FEEDBACK]"
             )
-            if writerMessages and isinstance(writerMessages[-1], HumanMessage):
-                writerMessages[-1] = HumanMessage(content=str(writerMessages[-1].content) + revisionContext)
-            else:
-                writerMessages.append(HumanMessage(content=revisionContext))
+            writerMessages = appendToLastMessage(writerMessages, revisionContext)
         result = invokeStructuredAgentWithEnforcedResponseTool(
             cvWriterAgent,
             writerMessages,
@@ -180,7 +178,7 @@ def agentNodeCV_writer(state: CVState, config: RunnableConfig) -> dict:
         activeOfferId = state.get("activeOfferId")
         if activeOfferId and writerOutput.get("cv"):
             try:
-                updateOfferCvOutputRecord(
+                updateOfferCvOutput(
                     offerId=int(activeOfferId),
                     cvOutput=str(writerOutput.get("cv") or ""),
                 )
@@ -192,31 +190,11 @@ def agentNodeCV_writer(state: CVState, config: RunnableConfig) -> dict:
             "structured_response": writerOutput,
             "status": "",
         }
-    except GraphRecursionError:
-        writerOutput = {
-            "message": "I could not finish CV generation because tool calls exceeded the safety limit. Please check database/tool availability and try again.",
-            "cv": None,
-        }
-        return {
-            "messages": [AIMessage(content=writerOutput["message"])],
-            "writerOutput": writerOutput,
-            "structured_response": writerOutput,
-            "status": "",
-        }
     except Exception as exc:
-        writerOutput = {
-            "message": formatLlmError(exc),
-            "cv": None,
-        }
-        return {
-            "messages": [AIMessage(content=writerOutput["message"])],
-            "writerOutput": writerOutput,
-            "structured_response": writerOutput,
-            "status": "",
-        }
+        return handleNodeError(exc, "writerOutput", {"cv": None})
 
 
-def agentNodeATS_reviewer(state: CVState, config: RunnableConfig) -> dict:
+def agentNodeATS_Reviewer(state: CVState, config: RunnableConfig) -> dict:
     try:
         writerOutput = state.get("writerOutput") or {}
         previousAtsScore = state.get("lastAtsScore")
@@ -237,19 +215,10 @@ def agentNodeATS_reviewer(state: CVState, config: RunnableConfig) -> dict:
                 "status": "",
             }
         reviewerContextStr = f"CV writer output JSON:\n{json.dumps(writerOutput, ensure_ascii=True)}"
-        
-        internshipOfferText = str(
-            state.get("internshipOfferText") or "").strip()
-        internshipOfferSource = str(
-            state.get("internshipOfferSource") or "").strip()
+        internshipOfferText = str(state.get("internshipOfferText") or "").strip()
+        internshipOfferSource = str(state.get("internshipOfferSource") or "").strip()
         if internshipOfferText:
-            offerContextParts = [
-                "Internship offer context is provided for ATS alignment analysis."]
-            if internshipOfferSource:
-                offerContextParts.append(f"Source: {internshipOfferSource}")
-            offerContextParts.append(f"Offer content:\n{internshipOfferText}")
-            reviewerContextStr += "\n\n[CONTEXT: JOB OFFER]\n" + "\n\n".join(offerContextParts) + "\n[/CONTEXT]"
-            
+            reviewerContextStr += buildOfferContext(internshipOfferText, internshipOfferSource, "Internship offer context is provided for ATS alignment analysis.")
         inputMessages = [HumanMessage(content=reviewerContextStr)]
         result = invokeStructuredAgentWithEnforcedResponseTool(
             atsReviewerAgent,
@@ -280,37 +249,46 @@ def agentNodeATS_reviewer(state: CVState, config: RunnableConfig) -> dict:
             "previousAtsScore": previousAtsScore,
             "status": "",
         }
-    except GraphRecursionError:
-        reviewerOutput = {
-            "message": "I could not finish ATS review because tool calls exceeded the safety limit.",
-            "ats": 0,
-            "feedback": "Check database/tool availability and retry.",
-        }
+    except Exception as exc:
+        return handleNodeError(exc, "reviewerOutput", {"ats": 0, "feedback": ""})
+
+
+def agentNodePdf_Generator(state: CVState, config: RunnableConfig) -> dict:
+    try:
+        writerOutput = state.get("writerOutput") or {}
+        cvText = writerOutput.get("cv")
+        if not cvText:
+            return {
+                "messages": [AIMessage(content="PDF generation skipped because no CV draft is available.")],
+                "status": "",
+            }
+
+        versionSuffix = "1"
+        activeOfferId = state.get("activeOfferId")
+        if activeOfferId:
+            try:
+                dbOffer = getOfferById(int(activeOfferId))
+                if dbOffer and hasattr(dbOffer, "cvVersion"):
+                    versionSuffix = str(dbOffer.cvVersion)
+            except Exception:
+                pass
+
+        promptText = f"Generate PDF from this CV text only, and use a concise `outputName` derived from the target role (e.g. 'cv_company_role_v{versionSuffix}') without the .pdf extension:\n\n{cvText}"
+        result = invokeStructuredAgent(
+            pdfGeneratorAgent,
+            {"messages": [HumanMessage(content=promptText)]},
+            {"recursion_limit": PDF_AGENT_RECURSION_LIMIT},
+            recursionLimit=PDF_AGENT_RECURSION_LIMIT,
+        )
+        msgs = result.get("messages", [])
+        message = str(msgs[-1].content or "").strip() if msgs and isinstance(msgs[-1], AIMessage) else ""
+        message = message or "PDF generation failed."
         return {
-            "messages": [AIMessage(content=reviewerOutput["message"])],
-            "reviewerOutput": reviewerOutput,
-            "structured_response": reviewerOutput,
-            "atsIterationCount": state.get("atsIterationCount", 0),
-            "lastAtsScore": state.get("lastAtsScore"),
-            "previousAtsScore": state.get("previousAtsScore"),
+            "messages": [AIMessage(content=message)],
             "status": "",
         }
     except Exception as exc:
-        reviewerOutput = {
-            "message": formatLlmError(exc),
-            "ats": 0,
-            "feedback": "Retry after checking model and tool configuration.",
-        }
-        return {
-            "messages": [AIMessage(content=reviewerOutput["message"])],
-            "reviewerOutput": reviewerOutput,
-            "structured_response": reviewerOutput,
-            "atsIterationCount": state.get("atsIterationCount", 0),
-            "lastAtsScore": state.get("lastAtsScore"),
-            "previousAtsScore": state.get("previousAtsScore"),
-            "status": "",
-        }
-
+        return handleNodeError(exc)
 
 def edgeNodeCvWriterToAtsReviewer(state: CVState) -> dict:
     return {"status": "Reviewing CV for ATS compatibility..."}
@@ -324,96 +302,18 @@ def edgeNodeAtsReviewerToPdfGenerator(state: CVState) -> dict:
     return {"status": "Generating final CV PDF..."}
 
 
-def agentNodePdf_Generator(state: CVState) -> dict:
-    writerOutput = state.get("writerOutput") or {}
-    cvText = writerOutput.get("cv")
-    if not cvText:
-        return {
-            "messages": [AIMessage(content="PDF generation skipped because no CV draft is available.")],
-            "status": "",
-        }
-
-    maxAttempts = max(1, PDF_AGENT_MAX_RETRIES + 1)
-    message = ""
-    previousError = ""
-
-    versionSuffix = "1"
-    activeOfferId = state.get("activeOfferId")
-    if activeOfferId:
-        try:
-            dbOffer = getOfferByIdRecord(int(activeOfferId))
-            if dbOffer and hasattr(dbOffer, "cvVersion"):
-                versionSuffix = str(dbOffer.cvVersion)
-        except Exception:
-            pass
-
-    for attempt in range(maxAttempts):
-        try:
-            promptText = (
-                f"Generate PDF from this CV text only, and use a concise `outputName` derived from the target role (e.g. 'cv_company_role_v{versionSuffix}') without the .pdf extension:\n\n{cvText}"
-            )
-            if previousError:
-                promptText = (
-                    f"Previous attempt failed with: {previousError}\n"
-                    "Retry now with safer LaTeX and ASCII-only text content.\n"
-                    + promptText
-                )
-            generatorContext = HumanMessage(content=promptText)
-            result = invokeStructuredAgent(
-                pdfGeneratorAgent,
-                {"messages": [generatorContext]},
-                {"recursion_limit": PDF_AGENT_RECURSION_LIMIT},
-                recursionLimit=PDF_AGENT_RECURSION_LIMIT,
-            )
-            allMessages = result.get("messages", [])
-            newMessages = allMessages[-1:] if allMessages else []
-            message = ""
-            if newMessages and isinstance(newMessages[0], AIMessage):
-                message = str(newMessages[0].content or "").strip()
-            if not message:
-                message = "PDF generation failed."
-
-            loweredMessage = message.lower()
-            if "error" not in loweredMessage and "failed" not in loweredMessage:
-                return {
-                    "messages": [AIMessage(content=message)],
-                    "status": "",
-                }
-
-            previousError = message
-            if attempt == maxAttempts - 1:
-                break
-        except Exception as exc:
-            previousError = formatLlmError(exc)
-            if attempt == maxAttempts - 1:
-                message = previousError
-                break
-
-    if not message:
-        message = previousError or "PDF generation failed."
-
-    return {
-        "messages": [AIMessage(content=message)],
-        "status": "",
-    }
-
-
 def buildGraph() -> StateGraph:
     def routeAfterCvWriter(state: CVState) -> str:
         writerOutput = state.get("writerOutput") or {}
         if writerOutput.get("cv"):
             return "atsReviewer"
-        return "human"
+        return "supervisor"
 
     def routeAfterAtsReviewer(state: CVState) -> str:
         reviewerOutput = state.get("reviewerOutput") or {}
-        if not reviewerOutput:
-            return "human"
         messageText = str(reviewerOutput.get("message", "")).lower()
         if "could not produce a structured ats response" in messageText:
-            return "human"
-        maxImprovementCycles = int(
-            os.getenv("ATS_MAX_IMPROVEMENT_CYCLES", "4"))
+            return "supervisor"
         previousAtsScore = state.get("previousAtsScore")
         iterationCount = int(state.get("atsIterationCount", 0) or 0)
         try:
@@ -421,47 +321,43 @@ def buildGraph() -> StateGraph:
         except Exception:
             atsScore = 0
         if atsScore < 75:
-            if iterationCount >= maxImprovementCycles:
+            if iterationCount >= ATS_MAX_IMPROVEMENT_CYCLES:
                 return "pdfGenerator"
             if previousAtsScore is not None and atsScore <= previousAtsScore:
-                return "human"
+                return "supervisor"
             return "cvWriter"
         return "pdfGenerator"
 
     graph = StateGraph(CVState)
-    graph.add_node("agentNodeLoadOffer", agentNodeLoadOffer)
-    graph.add_node("agentNodeCV_writer", agentNodeCV_writer)
-    graph.add_node("agentNodeATS_reviewer", agentNodeATS_reviewer)
-    graph.add_node("edgeNodeCvWriterToAtsReviewer",
-                   edgeNodeCvWriterToAtsReviewer)
-    graph.add_node("edgeNodeAtsReviewerToCvWriter",
-                   edgeNodeAtsReviewerToCvWriter)
-    graph.add_node("edgeNodeAtsReviewerToPdfGenerator",
-                   edgeNodeAtsReviewerToPdfGenerator)
+    graph.add_node("agentNodeLoad_Offer", agentNodeLoad_Offer)
+    graph.add_node("agentNodeCV_Writer", agentNodeCV_Writer)
+    graph.add_node("agentNodeATS_Reviewer", agentNodeATS_Reviewer)
+    graph.add_node("edgeNodeCvWriterToAtsReviewer", edgeNodeCvWriterToAtsReviewer)
+    graph.add_node("edgeNodeAtsReviewerToCvWriter", edgeNodeAtsReviewerToCvWriter)
+    graph.add_node("edgeNodeAtsReviewerToPdfGenerator", edgeNodeAtsReviewerToPdfGenerator)
     graph.add_node("agentNodePdf_Generator", agentNodePdf_Generator)
-    graph.add_edge(START, "agentNodeLoadOffer")
-    graph.add_edge("agentNodeLoadOffer", "agentNodeCV_writer")
+    graph.add_edge(START, "agentNodeLoad_Offer")
+    graph.add_edge("agentNodeLoad_Offer", "agentNodeCV_Writer")
     graph.add_conditional_edges(
-        "agentNodeCV_writer",
+        "agentNodeCV_Writer",
         routeAfterCvWriter,
         {
             "atsReviewer": "edgeNodeCvWriterToAtsReviewer",
-            "human": END,
+            "supervisor": END,
         },
     )
-    graph.add_edge("edgeNodeCvWriterToAtsReviewer", "agentNodeATS_reviewer")
+    graph.add_edge("edgeNodeCvWriterToAtsReviewer", "agentNodeATS_Reviewer")
     graph.add_conditional_edges(
-        "agentNodeATS_reviewer",
+        "agentNodeATS_Reviewer",
         routeAfterAtsReviewer,
         {
             "cvWriter": "edgeNodeAtsReviewerToCvWriter",
             "pdfGenerator": "edgeNodeAtsReviewerToPdfGenerator",
-            "human": END,
+            "supervisor": END,
         },
     )
-    graph.add_edge("edgeNodeAtsReviewerToCvWriter", "agentNodeCV_writer")
-    graph.add_edge("edgeNodeAtsReviewerToPdfGenerator",
-                   "agentNodePdf_Generator")
+    graph.add_edge("edgeNodeAtsReviewerToCvWriter", "agentNodeCV_Writer")
+    graph.add_edge("edgeNodeAtsReviewerToPdfGenerator", "agentNodePdf_Generator")
     graph.add_edge("agentNodePdf_Generator", END)
     return graph.compile()
 

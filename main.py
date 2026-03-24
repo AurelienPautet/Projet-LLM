@@ -1,7 +1,8 @@
-from typing import Literal, Optional
 import warnings
+from typing import Literal, Optional
 
-from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
+from langchain_core.messages import HumanMessage, AIMessage
+from langchain.agents import create_agent
 from pydantic import BaseModel, Field
 from rich.console import Console
 from rich.panel import Panel
@@ -13,18 +14,14 @@ from graph.cvGraph import cv_graph
 from graph.coverLetterGraph import coverLetterGraph
 from graph.offerGraph import offerGraph
 from graph.baseGraph import runGraph
-from llmUtils import buildChatModel, formatLlmError
+from llmUtils import buildChatModel, formatLlmError, extractStructuredOutput, invokeStructuredAgentWithEnforcedResponseTool
 from db.db import createDbAndTables
-from tool.tools import  searchOffers
-from langchain.agents import create_agent
-from llmUtils import extractStructuredOutput, invokeStructuredAgentWithEnforcedResponseTool
 
 warnings.filterwarnings(
     "ignore",
     category=UserWarning,
     message=r"Pydantic serializer warnings:[\s\S]*PydanticSerializationUnexpectedValue[\s\S]*",
 )
-
 
 console = Console()
 
@@ -115,16 +112,14 @@ def runSelectedGraph(route: str, firstQuestion: str, offerId: Optional[int], sta
                         agentName="Experience manager", firstQuestion=firstQuestion, allowUserInput=False)
     if route == "cv":
         if "cv" not in states:
-            states["cv"] = {"messages": [],
-                            "status": "", "activeOfferId": offerId}
+            states["cv"] = {"messages": [], "status": "", "activeOfferId": offerId}
         else:
             states["cv"]["activeOfferId"] = offerId
         return runGraph(cv_graph, states["cv"],
                         agentName="CV manager", firstQuestion=firstQuestion, allowUserInput=False)
     if route == "coverLetter":
         if "coverLetter" not in states:
-            states["coverLetter"] = {"messages": [],
-                                     "status": "", "activeOfferId": offerId}
+            states["coverLetter"] = {"messages": [], "status": "", "activeOfferId": offerId}
         else:
             states["coverLetter"]["activeOfferId"] = offerId
         return runGraph(coverLetterGraph, states["coverLetter"],
@@ -158,7 +153,6 @@ def main():
         chatHistory.append(HumanMessage(content=userText))
 
         while True:
-            # We construct a wrapper list for the supervisor so it sees history + current routing context
             supervisorMessages = list(chatHistory)
             if previousRoute:
                 supervisorMessages.append(HumanMessage(
@@ -166,8 +160,7 @@ def main():
 
             try:
                 with console.status("[bold cyan]Supervisor is deciding...[/bold cyan]", spinner="dots"):
-                    decision = routeWithSupervisor(
-                        supervisor, supervisorMessages)
+                    decision = routeWithSupervisor(supervisor, supervisorMessages)
             except Exception as exc:
                 console.print(f"[yellow]{formatLlmError(exc)}[/yellow]")
                 decision = SupervisorDecision(
@@ -207,7 +200,6 @@ def main():
             graphHistory = runSelectedGraph(
                 decision.route, actualQuestion, decision.offerId, graphStates)
 
-            # Extract the last output from the graph to give to the supervisor
             lastAgentMessage = ""
             if graphHistory:
                 for msg in reversed(graphHistory):
@@ -215,8 +207,6 @@ def main():
                         lastAgentMessage = msg.content
                         break
 
-            # If the coverLetter specialist asked questions and is waiting for user answers, stop looping.
-            # This prevents the supervisor from immediately re-routing before the user replies.
             if decision.route == "coverLetter":
                 coverLetterState = graphStates.get("coverLetter", {})
                 if coverLetterState.get("questionAskerHasRun") and not coverLetterState.get("writerOutput"):
@@ -224,7 +214,6 @@ def main():
                         chatHistory.append(AIMessage(content=lastAgentMessage))
                     break
 
-            # Inform the supervisor internally about what the agent did so it doesn't repeat it
             if lastAgentMessage:
                 chatHistory.append(HumanMessage(
                     content=f"[SYSTEM TO SUPERVISOR]: The specialist '{decision.route}' just outputted the following to the user:\n{lastAgentMessage}\n\nIMPORTANT: If the specialist's output ends with questions for the user (numbered questions, '?'), you MUST select 'user' route immediately and leave message blank — the user must reply first. Only route back to '{decision.route}' if the user's CURRENT message is a direct answer to those questions."))

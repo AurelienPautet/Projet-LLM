@@ -2,19 +2,19 @@ import os
 import time
 
 from dotenv import load_dotenv
-from langchain_core.messages import SystemMessage
-from langchain_core.runnables import RunnableConfig
-from langchain_core.messages import AIMessage, SystemMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage
 from langchain_openai import ChatOpenAI
 from rich.console import Console
 from pydantic import BaseModel
 
 load_dotenv()
 
-LLM_MIN_TOKENS = int(os.getenv("AI_MIN_TOKENS", "2"))
-LLM_MAX_RETRIES = int(os.getenv("AI_MIN_TOKENS_RETRIES", "10"))
-LLM_RETRY_BASE_DELAY = float(os.getenv("AI_RETRY_BASE_DELAY", "1.0"))
-AI_CLIENT_MAX_RETRIES = int(os.getenv("AI_CLIENT_MAX_RETRIES", "5"))
+LLM_MIN_TOKENS = 2
+LLM_MAX_RETRIES = 10
+LLM_RETRY_BASE_DELAY = 1.0
+LLM_CLIENT_MAX_RETRIES = 5
+LLM_TIMEOUT_SECONDS = 120
+
 console = Console()
 
 
@@ -31,9 +31,8 @@ def schemaToEmbeddingText(obj: BaseModel) -> str:
 
 
 def buildChatModel(timeoutSeconds: float | None = None, maxRetries: int | None = None) -> ChatOpenAI:
-    resolvedTimeout = timeoutSeconds if timeoutSeconds is not None else float(
-        os.getenv("AI_TIMEOUT_SECONDS", "120"))
-    resolvedRetries = maxRetries if maxRetries is not None else AI_CLIENT_MAX_RETRIES
+    resolvedTimeout = timeoutSeconds if timeoutSeconds is not None else LLM_TIMEOUT_SECONDS
+    resolvedRetries = maxRetries if maxRetries is not None else LLM_CLIENT_MAX_RETRIES
     return ChatOpenAI(
         model=os.getenv("AI_MODEL"),
         base_url=os.getenv("AI_ENDPOINT"),
@@ -48,8 +47,7 @@ def buildModel(tools: list) -> ChatOpenAI:
 
 
 def responseIsEmpty(response: AIMessage) -> bool:
-    hasToolCalls = bool(getattr(response, "tool_calls", None))
-    if hasToolCalls:
+    if bool(getattr(response, "tool_calls", None)):
         return False
     content = response.content
     if isinstance(content, str):
@@ -88,13 +86,13 @@ def extractStructuredOutput(result: dict) -> dict:
     return toDict(structured)
 
 
-def invokeStructuredAgent(agent, inputPayload: dict, config: RunnableConfig | dict | None = None, recursionLimit: int = 80) -> dict:
+def invokeStructuredAgent(agent, inputPayload: dict, config=None, recursionLimit: int = 80) -> dict:
     cfg = dict(config) if config else {}
     cfg.setdefault("recursion_limit", recursionLimit)
     return agent.invoke(inputPayload, config=cfg)
 
 
-def invokeStructuredAgentWithEnforcedResponseTool(agent, inputMessages: list, config: RunnableConfig | dict | None, schemaName: str, recursionLimit: int = 80) -> dict:
+def invokeStructuredAgentWithEnforcedResponseTool(agent, inputMessages: list, config, schemaName: str, recursionLimit: int = 80) -> dict:
     result = invokeStructuredAgent(
         agent,
         {"messages": inputMessages},
@@ -110,13 +108,8 @@ def invokeStructuredAgentWithEnforcedResponseTool(agent, inputMessages: list, co
             f"Retry now and finish by calling {schemaName} exactly once as the final action."
         )
     )
-    # Use the messages already returned by the agent (includes its AI responses),
-    # not the raw inputMessages, to avoid consecutive HumanMessages which cause
-    # 400 errors on strict models (e.g. DeepSeek).
     resultMessages = result.get("messages", [])
     baseMessages = resultMessages if resultMessages else inputMessages
-    # Safety: if the last base message is a HumanMessage, insert a brief AI
-    # acknowledgment so the enforcement HumanMessage is never consecutive.
     if baseMessages and isinstance(baseMessages[-1], HumanMessage):
         baseMessages = list(baseMessages) + [AIMessage(content="[Acknowledged, retrying structured output.]")]
     enforcedMessages = list(baseMessages) + [enforcementMessage]
@@ -134,3 +127,21 @@ def formatLlmError(error: Exception) -> str:
     if "429" in text or "rate-limit" in lowered or "rate limited" in lowered or "temporarily rate-limited" in lowered:
         return "The current model provider is rate-limited right now. Please retry in a few seconds."
     return f"LLM error: {text}"
+
+
+def handleNodeError(exc: Exception, fieldName: str | None = None, defaultValues: dict | None = None) -> dict:
+    from langgraph.errors import GraphRecursionError
+    isRecursion = isinstance(exc, GraphRecursionError)
+    if isRecursion:
+        msg = "I could not finish this step because tool calls exceeded the safety limit. Please check tool availability and try again."
+    else:
+        msg = formatLlmError(exc)
+
+    res = {"messages": [AIMessage(content=msg)], "status": ""}
+    if fieldName:
+        nodeOutput = {"message": msg}
+        if defaultValues:
+            nodeOutput.update(defaultValues)
+        res[fieldName] = nodeOutput
+        res["structured_response"] = nodeOutput
+    return res

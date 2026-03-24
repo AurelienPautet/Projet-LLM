@@ -1,19 +1,20 @@
-import os
-import re
 from typing import Optional
 
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 from langchain.agents import create_agent
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.runnables import RunnableConfig
 from langgraph.graph import StateGraph, START, END
-from langgraph.errors import GraphRecursionError
 
-from tool.tools import searchExperiences, getAllExperiences, getExperienceCount, getPersonalInfo, getAllPersonalInfo, generatePdfFromLatex,  saveOfferRecord, getOfferByIdRecord, updateOfferCoverLetterOutputRecord
+from tool.tools import searchExperiences, getAllExperiences, getExperienceCount, getPersonalInfo, getAllPersonalInfo, generatePdfFromLatex, getOfferById, updateOfferCoverLetterOutput
 from graph.baseGraph import BaseState
-from llmUtils import buildChatModel, extractStructuredOutput, invokeStructuredAgentWithEnforcedResponseTool, invokeStructuredAgent, formatLlmError
+from llmUtils import buildChatModel, extractStructuredOutput, invokeStructuredAgentWithEnforcedResponseTool, invokeStructuredAgent, formatLlmError, handleNodeError
 
 load_dotenv()
+
+AGENT_RECURSION_LIMIT = 80
+PDF_AGENT_RECURSION_LIMIT = 6
 
 
 class CoverLetterState(BaseState):
@@ -43,10 +44,6 @@ class QuestionAskerResponse(BaseModel):
 COVER_LETTER_WRITER_PROMPT = "You are an expert cover letter writer. Build or improve a personalized cover letter for the user using available experience and personal information data. Tailor the letter to the job offer when provided by the user. Use tools when retrieval, counting, or lookup is needed. Never claim a tool-backed action succeeded unless a tool result confirms it. If a tool returns an error, explain it and ask one concise next step. Keep the user-facing message concise and do not include the full cover letter in the message field. Put the complete letter in the coverLetter field. You must finish by calling the response tool for the structured schema exactly once as your final action. Return structured output only."
 PDF_GENERATOR_PROMPT = "You are a PDF generation agent. You receive cover letter text only. Build a valid standalone one-page LaTeX document using article class. Keep layout professional and concise. Escape LaTeX special characters in all text values: \\, &, %, $, #, _, {, }, ~, ^. Never call the PDF tool more than once. Call generatePdfFromLatex exactly once. For the `outputName` argument, use the exact file name provided by the user in the prompt. If tool returns an error, report it clearly in one short sentence. After the tool call, provide one concise final sentence with the generated PDF path when successful. Always return a message and never leave it empty. Return structured output only."
 QUESTION_ASKER_PROMPT = "You are a strategic cover letter interviewer. Generate exactly three concise and specific questions that help understand why the user applies and what they want to insist on in the letter. Questions must be specific to the target offer. Use available tools to retrieve offer context, experiences, and personal information when needed. If no offer context exists, ask one of the three questions to request the offer and keep the other two focused on motivation and emphasis. Output only the questions in the message field, numbered 1 to 3, and nothing else. You must finish by calling the response tool for the structured schema exactly once as your final action. Return structured output only."
-
-AGENT_RECURSION_LIMIT = int(os.getenv("AI_AGENT_RECURSION_LIMIT", "80"))
-PDF_AGENT_MAX_RETRIES = int(os.getenv("AI_PDF_MAX_RETRIES", "1"))
-PDF_AGENT_RECURSION_LIMIT = int(os.getenv("AI_PDF_AGENT_RECURSION_LIMIT", "6"))
 
 
 def buildCoverLetterWriterAgent():
@@ -85,32 +82,67 @@ pdfGeneratorAgent = buildPdfGeneratorAgent()
 questionAskerAgent = buildQuestionAskerAgent()
 
 
-def agentNodeQuestionAsker(state: CoverLetterState, config: dict) -> dict:
+def agentNodeLoad_Offer(state: CoverLetterState, config: RunnableConfig) -> dict:
+    offerId = state.get("activeOfferId")
+    if not offerId:
+        return {
+            "internshipOfferText": None,
+            "internshipOfferSource": None,
+            "status": "Analyzing request to ask motivation questions...",
+        }
+    try:
+        dbOffer = getOfferById(int(offerId))
+        if dbOffer is None:
+            return {
+                "messages": [AIMessage(content=f"Offer id={offerId} was not found. Continuing without offer context.")],
+                "internshipOfferText": None,
+                "internshipOfferSource": None,
+                "activeOfferId": None,
+                "status": "Analyzing request to ask motivation questions...",
+            }
+        return {
+            "internshipOfferText": dbOffer.offerText,
+            "internshipOfferSource": dbOffer.offerSource,
+            "activeOfferId": dbOffer.id,
+            "status": "Analyzing offer context to prepare questions...",
+        }
+    except Exception as exc:
+        return {
+            "messages": [AIMessage(content=formatLlmError(exc))],
+            "internshipOfferText": None,
+            "internshipOfferSource": None,
+            "activeOfferId": None,
+            "status": "Error loading offer, continuing to questions...",
+        }
+
+
+def buildOfferContext(offerText: str, offerSource: str, intro: str) -> str:
+    parts = [intro]
+    if offerSource:
+        parts.append(f"Source: {offerSource}")
+    parts.append(f"Offer content:\n{offerText}")
+    return "\n\n[CONTEXT: JOB OFFER]\n" + "\n\n".join(parts) + "\n[/CONTEXT]"
+
+
+def appendToLastMessage(messages: list, extra: str) -> list:
+    if messages and isinstance(messages[-1], HumanMessage):
+        messages[-1] = HumanMessage(content=str(messages[-1].content) + extra)
+    else:
+        messages.append(HumanMessage(content=extra))
+    return messages
+
+
+def agentNodeQuestion_Asker(state: CoverLetterState, config: RunnableConfig) -> dict:
     try:
         if bool(state.get("questionAskerHasRun", False)):
-            return {
-                "status": "",
-            }
+            return {"status": "Generating cover letter draft..."}
 
-        messages = list(state.get("messages") or [])
-        contextMessages = list(messages)
-        internshipOfferText = str(
-            state.get("internshipOfferText") or "").strip()
-        internshipOfferSource = str(
-            state.get("internshipOfferSource") or "").strip()
+        contextMessages = list(state.get("messages") or [])
+        internshipOfferText = str(state.get("internshipOfferText") or "").strip()
+        internshipOfferSource = str(state.get("internshipOfferSource") or "").strip()
         if internshipOfferText:
-            parts = [
-                "A job offer context is available. Generate offer-specific questions.",
-            ]
-            if internshipOfferSource:
-                parts.append(f"Source: {internshipOfferSource}")
-            parts.append(f"Offer content:\n{internshipOfferText}")
-            offer_str = "\n\n[CONTEXT: JOB OFFER]\n" + "\n\n".join(parts) + "\n[/CONTEXT]"
-            
-            if contextMessages and isinstance(contextMessages[-1], HumanMessage):
-                contextMessages[-1] = HumanMessage(content=str(contextMessages[-1].content) + offer_str)
-            else:
-                contextMessages.append(HumanMessage(content=offer_str))
+            offerStr = buildOfferContext(internshipOfferText, internshipOfferSource, "A job offer context is available. Generate offer-specific questions.")
+            contextMessages = appendToLastMessage(contextMessages, offerStr)
 
         result = invokeStructuredAgentWithEnforcedResponseTool(
             questionAskerAgent,
@@ -133,48 +165,18 @@ def agentNodeQuestionAsker(state: CoverLetterState, config: dict) -> dict:
             "questionAskerHasRun": True,
             "status": "",
         }
-    except GraphRecursionError:
-        questionOutput = {
-            "message": "I could not generate the motivation questions because tool calls exceeded the safety limit. Please retry."
-        }
-        return {
-            "messages": [AIMessage(content=questionOutput["message"])],
-            "structured_response": questionOutput,
-            "questionAskerHasRun": True,
-            "status": "",
-        }
     except Exception as exc:
-        questionOutput = {
-            "message": formatLlmError(exc)
-        }
-        return {
-            "messages": [AIMessage(content=questionOutput["message"])],
-            "structured_response": questionOutput,
-            "questionAskerHasRun": True,
-            "status": "",
-        }
+        return {**handleNodeError(exc, "structured_response"), "questionAskerHasRun": True}
 
 
-def agentNodeCoverLetterWriter(state: CoverLetterState, config: dict) -> dict:
+def agentNodeCover_Letter_Writer(state: CoverLetterState, config: RunnableConfig) -> dict:
     try:
         inputMessages = list(state["messages"])
-        internshipOfferText = str(
-            state.get("internshipOfferText") or "").strip()
-        internshipOfferSource = str(
-            state.get("internshipOfferSource") or "").strip()
+        internshipOfferText = str(state.get("internshipOfferText") or "").strip()
+        internshipOfferSource = str(state.get("internshipOfferSource") or "").strip()
         if internshipOfferText:
-            offerContextParts = [
-                "A job offer is provided below. Tailor the cover letter to this offer while staying truthful to known experiences."
-            ]
-            if internshipOfferSource:
-                offerContextParts.append(f"Source: {internshipOfferSource}")
-            offerContextParts.append(f"Offer content:\n{internshipOfferText}")
-            offer_str = "\n\n[CONTEXT: JOB OFFER]\n" + "\n\n".join(offerContextParts) + "\n[/CONTEXT]"
-            
-            if inputMessages and isinstance(inputMessages[-1], HumanMessage):
-                inputMessages[-1] = HumanMessage(content=str(inputMessages[-1].content) + offer_str)
-            else:
-                inputMessages.append(HumanMessage(content=offer_str))
+            offerStr = buildOfferContext(internshipOfferText, internshipOfferSource, "A job offer is provided below. Tailor the cover letter to this offer while staying truthful to known experiences.")
+            inputMessages = appendToLastMessage(inputMessages, offerStr)
 
         result = invokeStructuredAgentWithEnforcedResponseTool(
             coverLetterWriterAgent,
@@ -194,10 +196,9 @@ def agentNodeCoverLetterWriter(state: CoverLetterState, config: dict) -> dict:
         activeOfferId = state.get("activeOfferId")
         if activeOfferId and writerOutput.get("coverLetter"):
             try:
-                updateOfferCoverLetterOutputRecord(
+                updateOfferCoverLetterOutput(
                     offerId=int(activeOfferId),
-                    coverLetterOutput=str(
-                        writerOutput.get("coverLetter") or ""),
+                    coverLetterOutput=str(writerOutput.get("coverLetter") or ""),
                 )
             except Exception:
                 pass
@@ -207,148 +208,91 @@ def agentNodeCoverLetterWriter(state: CoverLetterState, config: dict) -> dict:
             "structured_response": writerOutput,
             "status": "",
         }
-    except GraphRecursionError:
-        writerOutput = {
-            "message": "I could not finish cover letter generation because tool calls exceeded the safety limit. Please check database and model availability, then retry.",
-            "coverLetter": None,
-        }
+    except Exception as exc:
+        return handleNodeError(exc, "writerOutput", {"coverLetter": None})
+
+
+def agentNodePdf_Generator(state: CoverLetterState, config: RunnableConfig) -> dict:
+    try:
+        writerOutput = state.get("writerOutput") or {}
+        coverLetterText = writerOutput.get("coverLetter")
+        if not coverLetterText:
+            return {
+                "messages": [AIMessage(content="PDF generation skipped because no cover letter draft is available.")],
+                "status": "",
+            }
+
+        versionSuffix = "1"
+        activeOfferId = state.get("activeOfferId")
+        if activeOfferId:
+            try:
+                dbOffer = getOfferById(int(activeOfferId))
+                if dbOffer and hasattr(dbOffer, "coverLetterVersion"):
+                    versionSuffix = str(dbOffer.coverLetterVersion)
+            except Exception:
+                pass
+
+        promptText = f"Generate PDF from this cover letter text only, and use a concise `outputName` derived from the text (e.g. 'cover_letter_company_role_v{versionSuffix}') without the .pdf extension:\n\n{coverLetterText}"
+        result = invokeStructuredAgent(
+            pdfGeneratorAgent,
+            {"messages": [HumanMessage(content=promptText)]},
+            {"recursion_limit": PDF_AGENT_RECURSION_LIMIT},
+            recursionLimit=PDF_AGENT_RECURSION_LIMIT,
+        )
+        msgs = result.get("messages", [])
+        message = str(msgs[-1].content or "").strip() if msgs and isinstance(msgs[-1], AIMessage) else ""
+        message = message or "PDF generation failed."
         return {
-            "messages": [AIMessage(content=writerOutput["message"])],
-            "writerOutput": writerOutput,
-            "structured_response": writerOutput,
+            "messages": [AIMessage(content=message)],
             "status": "",
         }
     except Exception as exc:
-        writerOutput = {
-            "message": formatLlmError(exc),
-            "coverLetter": None,
-        }
-        return {
-            "messages": [AIMessage(content=writerOutput["message"])],
-            "writerOutput": writerOutput,
-            "structured_response": writerOutput,
-            "status": "",
-        }
+        return handleNodeError(exc)
 
 
 def edgeNodeCoverLetterWriterToPdfGenerator(state: CoverLetterState) -> dict:
     return {"status": "Generating final cover letter PDF..."}
 
 
-def agentNodePdfGenerator(state: CoverLetterState) -> dict:
-    writerOutput = state.get("writerOutput") or {}
-    coverLetterText = writerOutput.get("coverLetter")
-    if not coverLetterText:
-        return {
-            "messages": [AIMessage(content="PDF generation skipped because no cover letter draft is available.")],
-            "status": "",
-        }
-
-    maxAttempts = max(1, PDF_AGENT_MAX_RETRIES + 1)
-    message = ""
-    previousError = ""
-
-    versionSuffix = "1"
-    activeOfferId = state.get("activeOfferId")
-    if activeOfferId:
-        try:
-            dbOffer = getOfferByIdRecord(int(activeOfferId))
-            if dbOffer and hasattr(dbOffer, "coverLetterVersion"):
-                versionSuffix = str(dbOffer.coverLetterVersion)
-        except Exception:
-            pass
-
-    for attempt in range(maxAttempts):
-        try:
-            promptText = (
-                f"Generate PDF from this cover letter text only, and use a concise `outputName` derived from the text (e.g. 'cover_letter_company_role_v{versionSuffix}') without the .pdf extension:\n\n{coverLetterText}"
-            )
-            if previousError:
-                promptText = (
-                    f"Previous attempt failed with: {previousError}\n"
-                    "Retry now with safer LaTeX and ASCII-only text content.\n"
-                    + promptText
-                )
-            result = invokeStructuredAgent(
-                pdfGeneratorAgent,
-                {"messages": [HumanMessage(content=promptText)]},
-                {"recursion_limit": PDF_AGENT_RECURSION_LIMIT},
-                recursionLimit=PDF_AGENT_RECURSION_LIMIT,
-            )
-            allMessages = result.get("messages", [])
-            newMessages = allMessages[-1:] if allMessages else []
-            message = ""
-            if newMessages and isinstance(newMessages[0], AIMessage):
-                message = str(newMessages[0].content or "").strip()
-            if not message:
-                message = "PDF generation failed."
-
-            loweredMessage = message.lower()
-            if "error" not in loweredMessage and "failed" not in loweredMessage:
-                return {
-                    "messages": [AIMessage(content=message)],
-                    "status": "",
-                }
-
-            previousError = message
-            if attempt == maxAttempts - 1:
-                break
-        except Exception as exc:
-            previousError = formatLlmError(exc)
-            if attempt == maxAttempts - 1:
-                message = previousError
-                break
-
-    if not message:
-        message = previousError or "PDF generation failed."
-
-    return {
-        "messages": [AIMessage(content=message)],
-        "status": "",
-    }
-
 
 def buildGraph() -> StateGraph:
     def routeAfterQuestionAsker(state: CoverLetterState) -> str:
         if bool(state.get("questionAskerHasRun", False)) and len(state.get("messages", [])) > 1:
             return "coverLetterWriter"
-        return "human"
+        return "supervisor"
 
     def routeAfterCoverLetterWriter(state: CoverLetterState) -> str:
         writerOutput = state.get("writerOutput") or {}
         if writerOutput.get("coverLetter"):
             return "pdfGenerator"
-        return "human"
+        return "supervisor"
 
     graph = StateGraph(CoverLetterState)
-    graph.add_node("agentNodeQuestionAsker", lambda state,
-                   config: agentNodeQuestionAsker(state, config))
-    graph.add_node("agentNodeCoverLetterWriter", lambda state,
-                   config: agentNodeCoverLetterWriter(state, config))
-    graph.add_node("edgeNodeCoverLetterWriterToPdfGenerator", lambda state,
-                   config: edgeNodeCoverLetterWriterToPdfGenerator(state))
-    graph.add_node("agentNodePdfGenerator", lambda state,
-                   config: agentNodePdfGenerator(state))
-    graph.add_edge(START, "agentNodeQuestionAsker")
+    graph.add_node("agentNodeLoad_Offer", agentNodeLoad_Offer)
+    graph.add_node("agentNodeQuestion_Asker", agentNodeQuestion_Asker)
+    graph.add_node("agentNodeCover_Letter_Writer", agentNodeCover_Letter_Writer)
+    graph.add_node("edgeNodeCoverLetterWriterToPdfGenerator", edgeNodeCoverLetterWriterToPdfGenerator)
+    graph.add_node("agentNodePdf_Generator", agentNodePdf_Generator)
+    graph.add_edge(START, "agentNodeLoad_Offer")
+    graph.add_edge("agentNodeLoad_Offer", "agentNodeQuestion_Asker")
     graph.add_conditional_edges(
-        "agentNodeQuestionAsker",
+        "agentNodeQuestion_Asker",
         routeAfterQuestionAsker,
         {
-            "human": END,
-            "coverLetterWriter": "agentNodeCoverLetterWriter",
+            "supervisor": END,
+            "coverLetterWriter": "agentNodeCover_Letter_Writer",
         },
     )
     graph.add_conditional_edges(
-        "agentNodeCoverLetterWriter",
+        "agentNodeCover_Letter_Writer",
         routeAfterCoverLetterWriter,
         {
             "pdfGenerator": "edgeNodeCoverLetterWriterToPdfGenerator",
-            "human": END,
+            "supervisor": END,
         },
     )
-    graph.add_edge("edgeNodeCoverLetterWriterToPdfGenerator",
-                   "agentNodePdfGenerator")
-    graph.add_edge("agentNodePdfGenerator", END)
+    graph.add_edge("edgeNodeCoverLetterWriterToPdfGenerator", "agentNodePdf_Generator")
+    graph.add_edge("agentNodePdf_Generator", END)
     return graph.compile()
 
 
