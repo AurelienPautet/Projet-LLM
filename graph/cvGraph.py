@@ -48,7 +48,7 @@ class AtsReviewerResponse(BaseModel):
 
 CV_WRITER_PROMPT = "You are an expert CV writer. Build or improve the user's CV using the available experience and personal information database. Use tools when retrieval, persistence, counting, editing, or deletion is needed. Never claim those actions succeeded unless a tool result confirms it. If a tool returns an error, do not retry in a loop. Explain the error and ask one concise next step. Ask concise clarification questions if information is missing. Retrieve personal information with getAllPersonalInfo or getPersonalInfo when needed to build the CV header and contact section. When ATS feedback is provided in context, apply it directly by rewriting the CV draft with concrete improvements using only known facts, and avoid repeating the ATS report verbatim. Never include the full CV in your user-facing message: only return the summary in the message field, and put the CV text in the cv field. You must finish by calling the response tool for the structured schema exactly once as your final action. Return structured output only."
 ATS_REVIEWER_PROMPT = "You are an ATS reviewer. Evaluate the CV draft for ATS compatibility and provide actionable feedback. If a job offer is provided in context, evaluate alignment with this offer and include concrete ATS-oriented adjustments to match keywords and requirements. Write your response in the same language as the CV content. Use tools when needed to verify experiences or retrieve missing details. Never claim tool-backed actions succeeded without tool confirmation. If a tool returns an error, do not retry in a loop. Explain the error and provide actionable next steps. You must finish by calling the response tool for the structured schema exactly once as your final action. Return structured output only."
-PDF_GENERATOR_PROMPT = "You are a PDF generation agent. You receive CV text only. Build a valid standalone one-page LaTeX CV using moderncv only: documentclass moderncv, moderncvstyle classic, moderncvcolor blue. Do not use optional icon packages or uncommon dependencies. Keep sections concise so output stays on one page. Use a safe structure only: preamble, begin document, makecvtitle, sections, end document. Use only \\section and \\cvitem for content rows. Do not use \\cventry, tabular, itemize, enumerate, custom macros, nested environments, or multiline command arguments. Escape LaTeX special characters in all text values: \\, &, %, $, #, _, {, }, ~, ^. Never include blank lines inside a command argument. Never call the PDF tool more than once. Call generatePdfFromLatex exactly once with your LaTeX and an outputName inferred from target role in kebab-case, no extension. If tool returns an error, report it clearly in one short sentence. After the tool call, provide one concise final sentence with the generated PDF path when successful. Always return a message and never leave it empty. Return structured output only. Answer as quickly as possible, do not explain your reasoning, do not reflect, just output the LaTeX and call the tool immediately."
+PDF_GENERATOR_PROMPT = "You are a PDF generation agent. You receive CV text only. Build a valid standalone one-page LaTeX CV using moderncv only: documentclass moderncv, moderncvstyle classic, moderncvcolor blue. Do not use optional icon packages or uncommon dependencies. Keep sections concise so output stays on one page. Use a safe structure only: preamble, begin document, makecvtitle, sections, end document. Use only \\section and \\cvitem for content rows. Do not use \\cventry, tabular, itemize, enumerate, custom macros, nested environments, or multiline command arguments. Escape LaTeX special characters in all text values: \\, &, %, $, #, _, {, }, ~, ^. Never include blank lines inside a command argument. Never call the PDF tool more than once. Call generatePdfFromLatex exactly once with the requested `outputName`. If tool returns an error, report it clearly in one short sentence. After the tool call, provide one concise final sentence with the generated PDF path when successful. Always return a message and never leave it empty. Return structured output only. Answer as quickly as possible, do not explain your reasoning, do not reflect, just output the LaTeX and call the tool immediately."
 # it's high on purpose because each agent action may involve multiple tool calls, and we want to allow for some back-and-forth between the CV writer and ATS reviewer agents without hitting the limit too early.
 AGENT_RECURSION_LIMIT = int(os.getenv("AI_AGENT_RECURSION_LIMIT", "80"))
 PDF_AGENT_TIMEOUT_SECONDS = float(os.getenv("AI_PDF_TIMEOUT_SECONDS", "35"))
@@ -139,23 +139,29 @@ def agentNodeCV_writer(state: CVState, config: RunnableConfig) -> dict:
             if internshipOfferSource:
                 offerContextParts.append(f"Source: {internshipOfferSource}")
             offerContextParts.append(f"Offer content:\n{internshipOfferText}")
-            writerMessages = [SystemMessage(
-                content="\n\n".join(offerContextParts))] + writerMessages
+            offer_str = "\n\n[CONTEXT: JOB OFFER]\n" + "\n\n".join(offerContextParts) + "\n[/CONTEXT]"
+            if writerMessages and isinstance(writerMessages[-1], HumanMessage):
+                writerMessages[-1] = HumanMessage(content=str(writerMessages[-1].content) + offer_str)
+            else:
+                writerMessages.append(HumanMessage(content=offer_str))
         reviewerOutput = state.get("reviewerOutput") or {}
         try:
             reviewerAts = int(reviewerOutput.get("ats", 0) or 0)
         except Exception:
             reviewerAts = 0
         if reviewerOutput and reviewerAts < 80:
-            revisionContext = SystemMessage(
-                content=(
-                    "You are now revising the previous CV draft after ATS review. "
-                    "Improve the CV content itself first. Keep the summary short. "
-                    "Do not paste ATS feedback bullets in your message. "
-                    f"ATS reviewer output JSON:\n{json.dumps(reviewerOutput, ensure_ascii=True)}"
-                )
+            revisionContext = (
+                "\n\n[ATS REVIEW FEEDBACK]\n"
+                "You are now revising the previous CV draft after ATS review. "
+                "Improve the CV content itself first. Keep the summary short. "
+                "Do not paste ATS feedback bullets in your message. "
+                f"ATS reviewer output JSON:\n{json.dumps(reviewerOutput, ensure_ascii=True)}"
+                "\n[/ATS REVIEW FEEDBACK]"
             )
-            writerMessages = [revisionContext] + writerMessages
+            if writerMessages and isinstance(writerMessages[-1], HumanMessage):
+                writerMessages[-1] = HumanMessage(content=str(writerMessages[-1].content) + revisionContext)
+            else:
+                writerMessages.append(HumanMessage(content=revisionContext))
         result = invokeStructuredAgentWithEnforcedResponseTool(
             cvWriterAgent,
             writerMessages,
@@ -230,10 +236,8 @@ def agentNodeATS_reviewer(state: CVState, config: RunnableConfig) -> dict:
                 "previousAtsScore": previousAtsScore,
                 "status": "",
             }
-        reviewerContext = SystemMessage(
-            content=f"CV writer output JSON:\n{json.dumps(writerOutput, ensure_ascii=True)}"
-        )
-        inputMessages = [reviewerContext]
+        reviewerContextStr = f"CV writer output JSON:\n{json.dumps(writerOutput, ensure_ascii=True)}"
+        
         internshipOfferText = str(
             state.get("internshipOfferText") or "").strip()
         internshipOfferSource = str(
@@ -244,8 +248,9 @@ def agentNodeATS_reviewer(state: CVState, config: RunnableConfig) -> dict:
             if internshipOfferSource:
                 offerContextParts.append(f"Source: {internshipOfferSource}")
             offerContextParts.append(f"Offer content:\n{internshipOfferText}")
-            inputMessages = [SystemMessage(
-                content="\n\n".join(offerContextParts))] + inputMessages
+            reviewerContextStr += "\n\n[CONTEXT: JOB OFFER]\n" + "\n\n".join(offerContextParts) + "\n[/CONTEXT]"
+            
+        inputMessages = [HumanMessage(content=reviewerContextStr)]
         result = invokeStructuredAgentWithEnforcedResponseTool(
             atsReviewerAgent,
             inputMessages,
@@ -332,16 +337,28 @@ def agentNodePdf_Generator(state: CVState) -> dict:
     message = ""
     previousError = ""
 
+    versionSuffix = "1"
+    activeOfferId = state.get("activeOfferId")
+    if activeOfferId:
+        try:
+            dbOffer = getOfferByIdRecord(int(activeOfferId))
+            if dbOffer and hasattr(dbOffer, "cvVersion"):
+                versionSuffix = str(dbOffer.cvVersion)
+        except Exception:
+            pass
+
     for attempt in range(maxAttempts):
         try:
-            promptText = f"Generate PDF from this CV text only:\n{cvText}"
+            promptText = (
+                f"Generate PDF from this CV text only, and use a concise `outputName` derived from the target role (e.g. 'cv_company_role_v{versionSuffix}') without the .pdf extension:\n\n{cvText}"
+            )
             if previousError:
                 promptText = (
                     f"Previous attempt failed with: {previousError}\n"
                     "Retry now with safer LaTeX and ASCII-only text content.\n"
                     + promptText
                 )
-            generatorContext = SystemMessage(content=promptText)
+            generatorContext = HumanMessage(content=promptText)
             result = invokeStructuredAgent(
                 pdfGeneratorAgent,
                 {"messages": [generatorContext]},
@@ -405,7 +422,7 @@ def buildGraph() -> StateGraph:
             atsScore = 0
         if atsScore < 75:
             if iterationCount >= maxImprovementCycles:
-                return "human"
+                return "pdfGenerator"
             if previousAtsScore is not None and atsScore <= previousAtsScore:
                 return "human"
             return "cvWriter"

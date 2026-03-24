@@ -55,8 +55,7 @@ def compileLatexToPdf(latexCode: str, outputName: str = "cv") -> str:
         cleanName = "cv"
     if cleanName.lower().endswith(".pdf"):
         cleanName = cleanName[:-4]
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    finalBaseName = f"{cleanName}_{timestamp}"
+    finalBaseName = cleanName
 
     outputDir = os.path.abspath("generatedPdfs")
     os.makedirs(outputDir, exist_ok=True)
@@ -208,11 +207,6 @@ def searchOffersVectorRecord(query: str, limit: int = 5) -> List[Offer]:
     return list(results)
 
 
-def getActiveOfferRecord() -> Optional[Offer]:
-    with Session(engine) as session:
-        return session.exec(select(Offer).order_by(Offer.updatedAt.desc(), Offer.id.desc())).first()
-
-
 def getOfferByIdRecord(offerId: int) -> Optional[Offer]:
     with Session(engine) as session:
         return session.get(Offer, offerId)
@@ -240,6 +234,7 @@ def updateOfferCvOutputRecord(offerId: int, cvOutput: str) -> Offer:
         if dbOffer is None:
             raise ValueError(f"no offer found with id={offerId}")
         dbOffer.cvOutput = cleanCvOutput
+        dbOffer.cvVersion += 1
         if dbOffer.coverLetterOutput:
             dbOffer.status = OfferStatus.COMPLETED
         else:
@@ -260,6 +255,7 @@ def updateOfferCoverLetterOutputRecord(offerId: int, coverLetterOutput: str) -> 
         if dbOffer is None:
             raise ValueError(f"no offer found with id={offerId}")
         dbOffer.coverLetterOutput = cleanCoverLetterOutput
+        dbOffer.coverLetterVersion += 1
         if dbOffer.cvOutput:
             dbOffer.status = OfferStatus.COMPLETED
         else:
@@ -565,23 +561,6 @@ def saveOffer(offerText: str, offerSource: str = "") -> str:
     except Exception as exc:
         return f"Error: saveOffer failed: {exc}"
 
-
-@tool
-def getActiveOffer() -> str:
-    """Get the most recently active offer from database."""
-    try:
-        dbOffer = getActiveOfferRecord()
-        if dbOffer is None:
-            return "No active offer found."
-        source = dbOffer.offerSource or "N/A"
-        cvLength = len(dbOffer.cvOutput or "")
-        coverLength = len(dbOffer.coverLetterOutput or "")
-        return (
-            f"id={dbOffer.id} | status={dbOffer.status.value} | source={source} | "
-            f"cvChars={cvLength} | coverLetterChars={coverLength} | offerText={dbOffer.offerText}"
-        )
-    except Exception as exc:
-        return f"Error: getActiveOffer failed: {exc}"
 
 
 @tool

@@ -15,7 +15,7 @@ from graph.offerGraph import offerGraph
 from graph.baseGraph import runGraph
 from llmUtils import buildChatModel, formatLlmError
 from db.db import createDbAndTables
-from tool.tools import getActiveOfferRecord, searchOffers
+from tool.tools import  searchOffers
 from langchain.agents import create_agent
 from llmUtils import extractStructuredOutput, invokeStructuredAgentWithEnforcedResponseTool
 
@@ -60,7 +60,7 @@ Route capabilities:
 
 Decision rules:
 1. If user asks to import/load/extract data from a CV file, pick experience.
-2. If user pastes a offer URL or a raw offer text, pick offer first.
+2. If user pastes a offer URL or a raw offer text, pick offer first. Dont forget to give the full url to the offer graph so it can fetch and extract data from it. 
 3. If user asks to save/store/fetch an offer, pick offer.
 4. If user asks to generate/improve a CV, pick cv.
 5. If user asks to generate/improve a cover letter, pick coverLetter.
@@ -161,7 +161,7 @@ def main():
             # We construct a wrapper list for the supervisor so it sees history + current routing context
             supervisorMessages = list(chatHistory)
             if previousRoute:
-                supervisorMessages.append(SystemMessage(
+                supervisorMessages.append(HumanMessage(
                     content=f"Hint: The previous specialist route was '{previousRoute}'."))
 
             try:
@@ -215,10 +215,19 @@ def main():
                         lastAgentMessage = msg.content
                         break
 
+            # If the coverLetter specialist asked questions and is waiting for user answers, stop looping.
+            # This prevents the supervisor from immediately re-routing before the user replies.
+            if decision.route == "coverLetter":
+                coverLetterState = graphStates.get("coverLetter", {})
+                if coverLetterState.get("questionAskerHasRun") and not coverLetterState.get("writerOutput"):
+                    if lastAgentMessage:
+                        chatHistory.append(AIMessage(content=lastAgentMessage))
+                    break
+
             # Inform the supervisor internally about what the agent did so it doesn't repeat it
             if lastAgentMessage:
-                chatHistory.append(SystemMessage(
-                    content=f"The specialist '{decision.route}' just outputted the following to the user:\n{lastAgentMessage}\n\nEvaluate if the user's original request requires any more steps. If the task is finished or the user needs to reply to the specialist's question, select 'user' and output NO message (leave message blank). If the last message from the user was them providing answers to the specialist's questions, you MUST route back to the '{decision.route}' route."))
+                chatHistory.append(HumanMessage(
+                    content=f"[SYSTEM TO SUPERVISOR]: The specialist '{decision.route}' just outputted the following to the user:\n{lastAgentMessage}\n\nIMPORTANT: If the specialist's output ends with questions for the user (numbered questions, '?'), you MUST select 'user' route immediately and leave message blank — the user must reply first. Only route back to '{decision.route}' if the user's CURRENT message is a direct answer to those questions."))
 
 
 if __name__ == "__main__":

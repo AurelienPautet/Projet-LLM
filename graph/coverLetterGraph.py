@@ -9,7 +9,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langgraph.graph import StateGraph, START, END
 from langgraph.errors import GraphRecursionError
 
-from tool.tools import searchExperiences, getAllExperiences, getExperienceCount, getPersonalInfo, getAllPersonalInfo, generatePdfFromLatex,  saveOfferRecord, getActiveOfferRecord, getOfferByIdRecord, updateOfferCoverLetterOutputRecord
+from tool.tools import searchExperiences, getAllExperiences, getExperienceCount, getPersonalInfo, getAllPersonalInfo, generatePdfFromLatex,  saveOfferRecord, getOfferByIdRecord, updateOfferCoverLetterOutputRecord
 from graph.baseGraph import BaseState
 from llmUtils import buildChatModel, extractStructuredOutput, invokeStructuredAgentWithEnforcedResponseTool, invokeStructuredAgent, formatLlmError
 
@@ -41,7 +41,7 @@ class QuestionAskerResponse(BaseModel):
 
 
 COVER_LETTER_WRITER_PROMPT = "You are an expert cover letter writer. Build or improve a personalized cover letter for the user using available experience and personal information data. Tailor the letter to the job offer when provided by the user. Use tools when retrieval, counting, or lookup is needed. Never claim a tool-backed action succeeded unless a tool result confirms it. If a tool returns an error, explain it and ask one concise next step. Keep the user-facing message concise and do not include the full cover letter in the message field. Put the complete letter in the coverLetter field. You must finish by calling the response tool for the structured schema exactly once as your final action. Return structured output only."
-PDF_GENERATOR_PROMPT = "You are a PDF generation agent. You receive cover letter text only. Build a valid standalone one-page LaTeX document using article class. Keep layout professional and concise. Escape LaTeX special characters in all text values: \\, &, %, $, #, _, {, }, ~, ^. Never call the PDF tool more than once. Call generatePdfFromLatex exactly once with your LaTeX and outputName cover-letter. If tool returns an error, report it clearly in one short sentence. After the tool call, provide one concise final sentence with the generated PDF path when successful. Always return a message and never leave it empty. Return structured output only."
+PDF_GENERATOR_PROMPT = "You are a PDF generation agent. You receive cover letter text only. Build a valid standalone one-page LaTeX document using article class. Keep layout professional and concise. Escape LaTeX special characters in all text values: \\, &, %, $, #, _, {, }, ~, ^. Never call the PDF tool more than once. Call generatePdfFromLatex exactly once. For the `outputName` argument, use the exact file name provided by the user in the prompt. If tool returns an error, report it clearly in one short sentence. After the tool call, provide one concise final sentence with the generated PDF path when successful. Always return a message and never leave it empty. Return structured output only."
 QUESTION_ASKER_PROMPT = "You are a strategic cover letter interviewer. Generate exactly three concise and specific questions that help understand why the user applies and what they want to insist on in the letter. Questions must be specific to the target offer. Use available tools to retrieve offer context, experiences, and personal information when needed. If no offer context exists, ask one of the three questions to request the offer and keep the other two focused on motivation and emphasis. Output only the questions in the message field, numbered 1 to 3, and nothing else. You must finish by calling the response tool for the structured schema exactly once as your final action. Return structured output only."
 
 AGENT_RECURSION_LIMIT = int(os.getenv("AI_AGENT_RECURSION_LIMIT", "80"))
@@ -105,8 +105,12 @@ def agentNodeQuestionAsker(state: CoverLetterState, config: dict) -> dict:
             if internshipOfferSource:
                 parts.append(f"Source: {internshipOfferSource}")
             parts.append(f"Offer content:\n{internshipOfferText}")
-            contextMessages = [SystemMessage(
-                content="\n\n".join(parts))] + contextMessages
+            offer_str = "\n\n[CONTEXT: JOB OFFER]\n" + "\n\n".join(parts) + "\n[/CONTEXT]"
+            
+            if contextMessages and isinstance(contextMessages[-1], HumanMessage):
+                contextMessages[-1] = HumanMessage(content=str(contextMessages[-1].content) + offer_str)
+            else:
+                contextMessages.append(HumanMessage(content=offer_str))
 
         result = invokeStructuredAgentWithEnforcedResponseTool(
             questionAskerAgent,
@@ -165,8 +169,12 @@ def agentNodeCoverLetterWriter(state: CoverLetterState, config: dict) -> dict:
             if internshipOfferSource:
                 offerContextParts.append(f"Source: {internshipOfferSource}")
             offerContextParts.append(f"Offer content:\n{internshipOfferText}")
-            inputMessages = [SystemMessage(
-                content="\n\n".join(offerContextParts))] + inputMessages
+            offer_str = "\n\n[CONTEXT: JOB OFFER]\n" + "\n\n".join(offerContextParts) + "\n[/CONTEXT]"
+            
+            if inputMessages and isinstance(inputMessages[-1], HumanMessage):
+                inputMessages[-1] = HumanMessage(content=str(inputMessages[-1].content) + offer_str)
+            else:
+                inputMessages.append(HumanMessage(content=offer_str))
 
         result = invokeStructuredAgentWithEnforcedResponseTool(
             coverLetterWriterAgent,
@@ -240,9 +248,21 @@ def agentNodePdfGenerator(state: CoverLetterState) -> dict:
     message = ""
     previousError = ""
 
+    versionSuffix = "1"
+    activeOfferId = state.get("activeOfferId")
+    if activeOfferId:
+        try:
+            dbOffer = getOfferByIdRecord(int(activeOfferId))
+            if dbOffer and hasattr(dbOffer, "coverLetterVersion"):
+                versionSuffix = str(dbOffer.coverLetterVersion)
+        except Exception:
+            pass
+
     for attempt in range(maxAttempts):
         try:
-            promptText = f"Generate PDF from this cover letter text only:\n{coverLetterText}"
+            promptText = (
+                f"Generate PDF from this cover letter text only, and use a concise `outputName` derived from the text (e.g. 'cover_letter_company_role_v{versionSuffix}') without the .pdf extension:\n\n{coverLetterText}"
+            )
             if previousError:
                 promptText = (
                     f"Previous attempt failed with: {previousError}\n"
@@ -251,7 +271,7 @@ def agentNodePdfGenerator(state: CoverLetterState) -> dict:
                 )
             result = invokeStructuredAgent(
                 pdfGeneratorAgent,
-                {"messages": [{"role": "system", "content": promptText}]},
+                {"messages": [HumanMessage(content=promptText)]},
                 {"recursion_limit": PDF_AGENT_RECURSION_LIMIT},
                 recursionLimit=PDF_AGENT_RECURSION_LIMIT,
             )

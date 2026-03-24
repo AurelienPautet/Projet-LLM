@@ -4,7 +4,7 @@ import time
 from dotenv import load_dotenv
 from langchain_core.messages import SystemMessage
 from langchain_core.runnables import RunnableConfig
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, SystemMessage, HumanMessage
 from langchain_openai import ChatOpenAI
 from rich.console import Console
 from pydantic import BaseModel
@@ -104,13 +104,22 @@ def invokeStructuredAgentWithEnforcedResponseTool(agent, inputMessages: list, co
     structured = extractStructuredOutput(result)
     if structured:
         return result
-    enforcementMessage = SystemMessage(
+    enforcementMessage = HumanMessage(
         content=(
-            f"Your previous turn did not include the final structured response tool call. "
+            f"SYSTEM ENFORCEMENT: Your previous turn did not include the final structured response tool call. "
             f"Retry now and finish by calling {schemaName} exactly once as the final action."
         )
     )
-    enforcedMessages = [enforcementMessage] + list(inputMessages)
+    # Use the messages already returned by the agent (includes its AI responses),
+    # not the raw inputMessages, to avoid consecutive HumanMessages which cause
+    # 400 errors on strict models (e.g. DeepSeek).
+    resultMessages = result.get("messages", [])
+    baseMessages = resultMessages if resultMessages else inputMessages
+    # Safety: if the last base message is a HumanMessage, insert a brief AI
+    # acknowledgment so the enforcement HumanMessage is never consecutive.
+    if baseMessages and isinstance(baseMessages[-1], HumanMessage):
+        baseMessages = list(baseMessages) + [AIMessage(content="[Acknowledged, retrying structured output.]")]
+    enforcedMessages = list(baseMessages) + [enforcementMessage]
     return invokeStructuredAgent(
         agent,
         {"messages": enforcedMessages},

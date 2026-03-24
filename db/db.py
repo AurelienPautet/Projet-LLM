@@ -88,6 +88,14 @@ class OfferBase(SQLModel):
         default=OfferStatus.OFFER_COLLECTED,
         description="current workflow status for this offer"
     )
+    cvVersion: int = Field(
+        default=0,
+        description="current version of the generated CV"
+    )
+    coverLetterVersion: int = Field(
+        default=0,
+        description="current version of the generated cover letter"
+    )
 
 
 class Offer(OfferBase, table=True):
