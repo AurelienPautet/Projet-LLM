@@ -116,11 +116,16 @@ def saveOfferRecord(offerText: str, offerSource: Optional[str] = None, status: O
     if not cleanOfferText:
         raise ValueError("offerText cannot be empty")
     cleanOfferSource = (offerSource or "").strip() or None
+    embeddingSource = cleanOfferText
+    if cleanOfferSource:
+        embeddingSource = f"{cleanOfferSource}\n{cleanOfferText}"
+    offerEmbedding = createEmbeddingFromText(embeddingSource)
     now = datetime.utcnow()
     with Session(engine) as session:
         dbOffer = Offer(
             offerText=cleanOfferText,
             offerSource=cleanOfferSource,
+            embedding=offerEmbedding,
             status=status,
             updatedAt=now,
         )
@@ -128,6 +133,79 @@ def saveOfferRecord(offerText: str, offerSource: Optional[str] = None, status: O
         session.commit()
         session.refresh(dbOffer)
         return dbOffer
+
+
+def formatOfferSummary(dbOffer: Offer) -> str:
+    source = dbOffer.offerSource or "N/A"
+    cvLength = len(dbOffer.cvOutput or "")
+    coverLength = len(dbOffer.coverLetterOutput or "")
+    return (
+        f"id={dbOffer.id} | status={dbOffer.status.value} | source={source} | "
+        f"cvChars={cvLength} | coverLetterChars={coverLength} | offerText={dbOffer.offerText}"
+    )
+
+
+def tokenizeOfferSearchQuery(query: str) -> List[str]:
+    cleanQuery = (query or "").lower()
+    tokens = re.findall(r"[a-z0-9]{3,}", cleanQuery)
+    stopWords = {
+        "the", "and", "for", "with", "from", "this", "that", "job", "offer", "internship", "role",
+        "using", "about", "into", "your", "you", "are", "was", "were", "have", "has", "had", "can", "will",
+        "all", "any", "one", "two", "three", "new", "use", "same", "last", "active"
+    }
+    uniqueTokens: List[str] = []
+    for token in tokens:
+        if token in stopWords:
+            continue
+        if token not in uniqueTokens:
+            uniqueTokens.append(token)
+    return uniqueTokens
+
+
+def searchOffersKeywordRecord(query: str, limit: int = 5) -> List[Offer]:
+    cleanQuery = (query or "").strip()
+    if not cleanQuery:
+        return []
+    safeLimit = max(1, min(int(limit), 20))
+    tokens = tokenizeOfferSearchQuery(cleanQuery)
+    with Session(engine) as session:
+        if tokens:
+            statement = select(Offer)
+            for token in tokens:
+                tokenFilter = (Offer.offerText.ilike(
+                    f"%{token}%")) | (Offer.offerSource.ilike(f"%{token}%"))
+                statement = statement.where(tokenFilter)
+            tokenResults = session.exec(
+                statement.order_by(Offer.updatedAt.desc(),
+                                   Offer.id.desc()).limit(safeLimit)
+            ).all()
+            if tokenResults:
+                return list(tokenResults)
+
+        fallbackResults = session.exec(
+            select(Offer)
+            .where((Offer.offerText.ilike(f"%{cleanQuery}%")) |
+                   (Offer.offerSource.ilike(f"%{cleanQuery}%")))
+            .order_by(Offer.updatedAt.desc(), Offer.id.desc())
+            .limit(safeLimit)
+        ).all()
+        return list(fallbackResults)
+
+
+def searchOffersVectorRecord(query: str, limit: int = 5) -> List[Offer]:
+    cleanQuery = (query or "").strip()
+    if not cleanQuery:
+        return []
+    safeLimit = max(1, min(int(limit), 20))
+    queryEmbedding = createEmbeddingFromText(cleanQuery)
+    with Session(engine) as session:
+        results = session.exec(
+            select(Offer)
+            .where(Offer.embedding.is_not(None))
+            .order_by(Offer.embedding.op("<=>")(cast(queryEmbedding, Vector(3072))))
+            .limit(safeLimit)
+        ).all()
+    return list(results)
 
 
 def getActiveOfferRecord() -> Optional[Offer]:
@@ -444,7 +522,7 @@ def generatePdfFromLatex(latexCode: str, outputName: str = "cv") -> str:
 
 @tool
 def fetchWebPageContent(url: str) -> str:
-    """Fetch text content from a web page URL."""
+    """Fetch text content from a web page URL. Requires a valid URL starting with http:// or https://."""
     try:
         parsed = urlparse(url.strip())
         if parsed.scheme not in {"http", "https"}:
@@ -469,9 +547,10 @@ def fetchWebPageContent(url: str) -> str:
         if not content:
             return "Error: no readable text content was found on this page."
 
-        maxChars = 12000
+        maxChars = 6000
         if len(content) > maxChars:
-            content = content[:maxChars]
+            content = content[:maxChars] + \
+                " ... [Content truncated to fit context limits]"
         return content
     except Exception as exc:
         return f"Error: fetchWebPageContent failed: {exc}"
@@ -512,15 +591,45 @@ def getOfferById(offerId: int) -> str:
         dbOffer = getOfferByIdRecord(offerId)
         if dbOffer is None:
             return f"No offer found with id={offerId}."
-        source = dbOffer.offerSource or "N/A"
-        cvLength = len(dbOffer.cvOutput or "")
-        coverLength = len(dbOffer.coverLetterOutput or "")
-        return (
-            f"id={dbOffer.id} | status={dbOffer.status.value} | source={source} | "
-            f"cvChars={cvLength} | coverLetterChars={coverLength} | offerText={dbOffer.offerText}"
-        )
+        return formatOfferSummary(dbOffer)
     except Exception as exc:
         return f"Error: getOfferById failed: {exc}"
+
+
+@tool
+def searchOffers(query: str, limit: int = 5, mode: str = "hybrid") -> str:
+    """Search existing offers and return matching offer ids. mode can be keyword, vector, or hybrid."""
+    try:
+        cleanQuery = (query or "").strip()
+        if not cleanQuery:
+            return "Error: query cannot be empty"
+        normalizedMode = (mode or "hybrid").strip().lower()
+        if normalizedMode not in {"keyword", "vector", "hybrid"}:
+            return "Error: mode must be one of keyword, vector, hybrid"
+
+        safeLimit = max(1, min(int(limit), 20))
+        if normalizedMode == "keyword":
+            matches = searchOffersKeywordRecord(cleanQuery, safeLimit)
+        elif normalizedMode == "vector":
+            matches = searchOffersVectorRecord(cleanQuery, safeLimit)
+        else:
+            keywordMatches = searchOffersKeywordRecord(cleanQuery, safeLimit)
+            vectorMatches = searchOffersVectorRecord(cleanQuery, safeLimit)
+            mergedMatches: List[Offer] = []
+            seenIds = set()
+            for dbOffer in keywordMatches + vectorMatches:
+                if dbOffer.id in seenIds:
+                    continue
+                seenIds.add(dbOffer.id)
+                mergedMatches.append(dbOffer)
+            matches = mergedMatches[:safeLimit]
+
+        if not matches:
+            return "No offers found."
+
+        return "\n".join([formatOfferSummary(dbOffer) for dbOffer in matches])
+    except Exception as exc:
+        return f"Error: searchOffers failed: {exc}"
 
 
 @tool

@@ -403,7 +403,7 @@ def buildGraph() -> StateGraph:
             atsScore = int(reviewerOutput.get("ats", 0) or 0)
         except Exception:
             atsScore = 0
-        if atsScore < 80:
+        if atsScore < 75:
             if iterationCount >= maxImprovementCycles:
                 return "human"
             if previousAtsScore is not None and atsScore <= previousAtsScore:

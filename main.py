@@ -1,7 +1,7 @@
 from typing import Literal, Optional
 import warnings
 
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
 from pydantic import BaseModel, Field
 from rich.console import Console
 from rich.panel import Panel
@@ -15,7 +15,9 @@ from graph.offerGraph import offerGraph
 from graph.baseGraph import runGraph
 from llmUtils import buildChatModel, formatLlmError
 from db.db import createDbAndTables
-from tool.tools import getActiveOfferRecord
+from tool.tools import getActiveOfferRecord, searchOffers
+from langchain.agents import create_agent
+from llmUtils import extractStructuredOutput, invokeStructuredAgentWithEnforcedResponseTool
 
 warnings.filterwarnings(
     "ignore",
@@ -33,7 +35,15 @@ class SupervisorDecision(BaseModel):
         description="Selected route.")
     offerId: Optional[int] = Field(
         default=None,
-        description="Offer id to use for CV or cover letter workflows when provided by user.")
+        description="Offer id to use for offer, CV, or cover letter workflows when provided by user.")
+    tailoredQuestion: Optional[str] = Field(
+        default=None,
+        description="Rewritten and clear request tailored specifically for the chosen specialist route, free from filler."
+    )
+    restartSpecialist: bool = Field(
+        default=False,
+        description="Set to true ONLY if the user explicitly asks to restart, clear, or redo the task from scratch (e.g., 'redo the letter', 'recommence', 'refait')."
+    )
 
 
 SUPERVISOR_PROMPT = """
@@ -50,17 +60,22 @@ Route capabilities:
 
 Decision rules:
 1. If user asks to import/load/extract data from a CV file, pick experience.
-2. If user pastes a new offer URL or a new raw offer text, pick offer first.
+2. If user pastes a offer URL or a raw offer text, pick offer first.
 3. If user asks to save/store/fetch an offer, pick offer.
 4. If user asks to generate/improve a CV, pick cv.
 5. If user asks to generate/improve a cover letter, pick coverLetter.
-5. If user asks to continue/refine/retry and previous route is meaningful, keep previous route.
-6. Use user when the input is conversational and no specialist action is required.
+6. If user asks to continue/refine/retry, or if the user is providing answers to questions previously asked by a specialist, MUST keep the previous specialist route.
+7. Use user when the input is purely conversational and no specialist action is required.
+8. Always provide a tailoredQuestion when routing to specialist agents. Extract only the crucial instructions, format them clearly, and leave out conversational filler.
+9. If the user asks to redo, restart, or recreate the document entirely from scratch, set restartSpecialist to true so the old state is cleared before running.
+
+IMPORTANT: You now have full memory of the conversation. DO NOT repeat the questions or output from the specialists. If the most recent event is a specialist asking the user a question, select the 'user' route and leave message blank (so the user can reply). BUT IF the most recent event is the user replying to those questions, you MUST route them to that previous specialist so it can continue!
 
 offerId policy:
 - Extract a numeric offerId from user text when present.
+- If an existing offer candidate is provided in context, use it when user intent targets an existing offer.
 - If user asks for CV/cover letter for the same/previous offer and activeOfferId exists, set offerId to activeOfferId.
-- For offer route, keep offerId as null.
+- For offer route, set offerId when user refers to an existing offer.
 
 Keep message concise and actionable. Return structured output only.
 """.strip()
@@ -68,45 +83,53 @@ Keep message concise and actionable. Return structured output only.
 
 def buildSupervisor():
     model = buildChatModel()
-    return model.with_structured_output(SupervisorDecision)
-
-
-def routeWithSupervisor(supervisor, userText: str, previousRoute: Optional[str]) -> SupervisorDecision:
-    activeOffer = getActiveOfferRecord()
-    activeOfferId = activeOffer.id if activeOffer else None
-    activeOfferStatus = activeOffer.status.value if activeOffer else "none"
-    activeOfferSource = activeOffer.offerSource if activeOffer else "none"
-    contextText = (
-        f"Previous route: {previousRoute or 'none'}\n"
-        f"Active offer id: {activeOfferId}\n"
-        f"Active offer status: {activeOfferStatus}\n"
-        f"Active offer source: {activeOfferSource}\n"
-        f"User request: {userText}"
+    return create_agent(
+        model=model,
+        tools=[],
+        system_prompt=SUPERVISOR_PROMPT,
+        response_format=SupervisorDecision
     )
-    return supervisor.invoke([
-        SystemMessage(content=SUPERVISOR_PROMPT),
-        HumanMessage(content=contextText),
-    ])
 
 
-def runSelectedGraph(route: str, firstQuestion: str, offerId: Optional[int] = None):
+def routeWithSupervisor(supervisor, messages: list) -> SupervisorDecision:
+    result = invokeStructuredAgentWithEnforcedResponseTool(
+        supervisor,
+        messages,
+        config=None,
+        schemaName="SupervisorDecision"
+    )
+    structured_dict = extractStructuredOutput(result)
+    return SupervisorDecision(**structured_dict)
+
+
+def runSelectedGraph(route: str, firstQuestion: str, offerId: Optional[int], states: dict):
     if route == "offer":
-        runGraph(offerGraph, {"messages": [], "status": ""},
-                 agentName="Offer manager", firstQuestion=firstQuestion, allowUserInput=False)
-        return
+        if "offer" not in states:
+            states["offer"] = {"messages": [], "status": ""}
+        return runGraph(offerGraph, states["offer"],
+                        agentName="Offer manager", firstQuestion=firstQuestion, allowUserInput=False)
     if route == "experience":
-        runGraph(career_graph, {"messages": [], "status": ""},
-                 agentName="Experience manager", firstQuestion=firstQuestion, allowUserInput=False)
-        return
+        if "experience" not in states:
+            states["experience"] = {"messages": [], "status": ""}
+        return runGraph(career_graph, states["experience"],
+                        agentName="Experience manager", firstQuestion=firstQuestion, allowUserInput=False)
     if route == "cv":
-        initialState = {"messages": [], "status": "", "activeOfferId": offerId}
-        runGraph(cv_graph, initialState,
-                 agentName="CV manager", firstQuestion=firstQuestion, allowUserInput=False)
-        return
+        if "cv" not in states:
+            states["cv"] = {"messages": [],
+                            "status": "", "activeOfferId": offerId}
+        else:
+            states["cv"]["activeOfferId"] = offerId
+        return runGraph(cv_graph, states["cv"],
+                        agentName="CV manager", firstQuestion=firstQuestion, allowUserInput=False)
     if route == "coverLetter":
-        initialState = {"messages": [], "status": "", "activeOfferId": offerId}
-        runGraph(coverLetterGraph, initialState,
-                 agentName="Cover letter manager", firstQuestion=firstQuestion, allowUserInput=False)
+        if "coverLetter" not in states:
+            states["coverLetter"] = {"messages": [],
+                                     "status": "", "activeOfferId": offerId}
+        else:
+            states["coverLetter"]["activeOfferId"] = offerId
+        return runGraph(coverLetterGraph, states["coverLetter"],
+                        agentName="Cover letter manager", firstQuestion=firstQuestion, allowUserInput=False)
+    return []
 
 
 def main():
@@ -118,6 +141,8 @@ def main():
 
     supervisor = buildSupervisor()
     previousRoute: Optional[str] = None
+    chatHistory = []
+    graphStates = {}
 
     while True:
         try:
@@ -130,35 +155,70 @@ def main():
         if not userText:
             continue
 
-        try:
-            with console.status("[bold cyan]Supervisor is deciding...[/bold cyan]", spinner="dots"):
-                decision = routeWithSupervisor(
-                    supervisor, userText, previousRoute)
-        except Exception as exc:
-            console.print(f"[yellow]{formatLlmError(exc)}[/yellow]")
-            decision = SupervisorDecision(
-                message="I could not decide the next route right now. Please rephrase your request.",
-                route="clarify",
-                offerId=None,
-            )
+        chatHistory.append(HumanMessage(content=userText))
 
-        if decision.route == "quit":
-            console.print("[bold blue]Goodbye![/bold blue]")
-            break
+        while True:
+            # We construct a wrapper list for the supervisor so it sees history + current routing context
+            supervisorMessages = list(chatHistory)
+            if previousRoute:
+                supervisorMessages.append(SystemMessage(
+                    content=f"Hint: The previous specialist route was '{previousRoute}'."))
 
-        if decision.route == "clarify":
-            console.print(
-                f"[bold blue]Supervisor:[/bold blue] {decision.message}")
-            continue
+            try:
+                with console.status("[bold cyan]Supervisor is deciding...[/bold cyan]", spinner="dots"):
+                    decision = routeWithSupervisor(
+                        supervisor, supervisorMessages)
+            except Exception as exc:
+                console.print(f"[yellow]{formatLlmError(exc)}[/yellow]")
+                decision = SupervisorDecision(
+                    message="I could not decide the next route right now. Please rephrase your request.",
+                    route="clarify",
+                    offerId=None,
+                )
 
-        if decision.route == "user":
-            console.print(
-                f"[bold blue]Supervisor:[/bold blue] {decision.message}")
-            continue
+            if decision.route == "quit":
+                console.print("[bold blue]Supervisor:[/bold blue] Goodbye!")
+                return
 
-        console.print(f"[bold blue]Supervisor:[/bold blue] {decision.message}")
-        previousRoute = decision.route
-        runSelectedGraph(decision.route, userText, decision.offerId)
+            if decision.route == "clarify":
+                console.print(
+                    f"[bold blue]Supervisor:[/bold blue] {decision.message}")
+                chatHistory.append(AIMessage(content=decision.message))
+                break
+
+            if decision.route == "user":
+                if decision.message.strip():
+                    console.print(
+                        f"[bold blue]Supervisor:[/bold blue] {decision.message}")
+                    chatHistory.append(AIMessage(content=decision.message))
+                break
+
+            if decision.message.strip():
+                console.print(
+                    f"[bold blue]Supervisor:[/bold blue] {decision.message}")
+                chatHistory.append(AIMessage(content=decision.message))
+
+            previousRoute = decision.route
+            actualQuestion = decision.tailoredQuestion if decision.tailoredQuestion else userText
+
+            if decision.restartSpecialist and decision.route in graphStates:
+                del graphStates[decision.route]
+
+            graphHistory = runSelectedGraph(
+                decision.route, actualQuestion, decision.offerId, graphStates)
+
+            # Extract the last output from the graph to give to the supervisor
+            lastAgentMessage = ""
+            if graphHistory:
+                for msg in reversed(graphHistory):
+                    if isinstance(msg, AIMessage) and msg.content and isinstance(msg.content, str):
+                        lastAgentMessage = msg.content
+                        break
+
+            # Inform the supervisor internally about what the agent did so it doesn't repeat it
+            if lastAgentMessage:
+                chatHistory.append(SystemMessage(
+                    content=f"The specialist '{decision.route}' just outputted the following to the user:\n{lastAgentMessage}\n\nEvaluate if the user's original request requires any more steps. If the task is finished or the user needs to reply to the specialist's question, select 'user' and output NO message (leave message blank). If the last message from the user was them providing answers to the specialist's questions, you MUST route back to the '{decision.route}' route."))
 
 
 if __name__ == "__main__":

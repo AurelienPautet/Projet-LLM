@@ -9,7 +9,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langgraph.graph import StateGraph, START, END
 from langgraph.errors import GraphRecursionError
 
-from tool.tools import searchExperiences, getAllExperiences, getExperienceCount, getPersonalInfo, getAllPersonalInfo, generatePdfFromLatex, fetchWebPageContent, saveOfferRecord, getActiveOfferRecord, getOfferByIdRecord, updateOfferCoverLetterOutputRecord
+from tool.tools import searchExperiences, getAllExperiences, getExperienceCount, getPersonalInfo, getAllPersonalInfo, generatePdfFromLatex,  saveOfferRecord, getActiveOfferRecord, getOfferByIdRecord, updateOfferCoverLetterOutputRecord
 from graph.baseGraph import BaseState
 from llmUtils import buildChatModel, extractStructuredOutput, invokeStructuredAgentWithEnforcedResponseTool, invokeStructuredAgent, formatLlmError
 
@@ -34,26 +34,6 @@ class CoverLetterWriterResponse(BaseModel):
     )
 
 
-class OfferIntakeResponse(BaseModel):
-    message: str = Field(
-        description="Short result message about internship offer intake."
-    )
-    hasOffer: bool = Field(
-        description="True if an internship offer was found and captured."
-    )
-    offerType: str = Field(
-        description="Detected offer type: none, text, or url."
-    )
-    offerText: Optional[str] = Field(
-        default=None,
-        description="Offer content as plain text."
-    )
-    offerSource: Optional[str] = Field(
-        default=None,
-        description="Offer source identifier or URL."
-    )
-
-
 class QuestionAskerResponse(BaseModel):
     message: str = Field(
         description="Exactly three specific questions for the user, tailored to the offer and focused on motivation and key points to insist on."
@@ -62,7 +42,6 @@ class QuestionAskerResponse(BaseModel):
 
 COVER_LETTER_WRITER_PROMPT = "You are an expert cover letter writer. Build or improve a personalized cover letter for the user using available experience and personal information data. Tailor the letter to the job offer when provided by the user. Use tools when retrieval, counting, or lookup is needed. Never claim a tool-backed action succeeded unless a tool result confirms it. If a tool returns an error, explain it and ask one concise next step. Keep the user-facing message concise and do not include the full cover letter in the message field. Put the complete letter in the coverLetter field. You must finish by calling the response tool for the structured schema exactly once as your final action. Return structured output only."
 PDF_GENERATOR_PROMPT = "You are a PDF generation agent. You receive cover letter text only. Build a valid standalone one-page LaTeX document using article class. Keep layout professional and concise. Escape LaTeX special characters in all text values: \\, &, %, $, #, _, {, }, ~, ^. Never call the PDF tool more than once. Call generatePdfFromLatex exactly once with your LaTeX and outputName cover-letter. If tool returns an error, report it clearly in one short sentence. After the tool call, provide one concise final sentence with the generated PDF path when successful. Always return a message and never leave it empty. Return structured output only."
-OFFER_INTAKE_PROMPT = "You analyze the latest user request and detect whether it contains an internship offer. If there is a URL to an offer page, call fetchWebPageContent exactly once and use the fetched content as offerText. If there is plain offer text, extract it directly as offerText. If there is no offer, set hasOffer to false and offerType to none. Keep message concise. You must finish by calling the response tool for the structured schema exactly once as your final action. Return structured output only."
 QUESTION_ASKER_PROMPT = "You are a strategic cover letter interviewer. Generate exactly three concise and specific questions that help understand why the user applies and what they want to insist on in the letter. Questions must be specific to the target offer. Use available tools to retrieve offer context, experiences, and personal information when needed. If no offer context exists, ask one of the three questions to request the offer and keep the other two focused on motivation and emphasis. Output only the questions in the message field, numbered 1 to 3, and nothing else. You must finish by calling the response tool for the structured schema exactly once as your final action. Return structured output only."
 
 AGENT_RECURSION_LIMIT = int(os.getenv("AI_AGENT_RECURSION_LIMIT", "80"))
@@ -90,21 +69,11 @@ def buildPdfGeneratorAgent():
     )
 
 
-def buildOfferIntakeAgent():
-    model = buildChatModel()
-    return create_agent(
-        model=model,
-        tools=[fetchWebPageContent],
-        system_prompt=OFFER_INTAKE_PROMPT,
-        response_format=OfferIntakeResponse,
-    )
-
-
 def buildQuestionAskerAgent():
     model = buildChatModel()
     return create_agent(
         model=model,
-        tools=[fetchWebPageContent, searchExperiences, getAllExperiences,
+        tools=[searchExperiences, getAllExperiences,
                getExperienceCount, getAllPersonalInfo, getPersonalInfo],
         system_prompt=QUESTION_ASKER_PROMPT,
         response_format=QuestionAskerResponse,
@@ -113,116 +82,7 @@ def buildQuestionAskerAgent():
 
 coverLetterWriterAgent = buildCoverLetterWriterAgent()
 pdfGeneratorAgent = buildPdfGeneratorAgent()
-offerIntakeAgent = buildOfferIntakeAgent()
 questionAskerAgent = buildQuestionAskerAgent()
-
-
-def extractLatestHumanText(messages: list) -> str:
-    for message in reversed(messages):
-        if isinstance(message, HumanMessage):
-            return str(message.content or "").strip()
-    return ""
-
-
-def extractLatestUrlFromHumanMessages(messages: list) -> str:
-    for message in reversed(messages):
-        if not isinstance(message, HumanMessage):
-            continue
-        text = str(message.content or "")
-        match = re.search(r"https?://\S+", text)
-        if match:
-            return match.group(0).rstrip(".,;)")
-    return ""
-
-
-def agentNodeOfferIntake(state: CoverLetterState, config: dict) -> dict:
-    try:
-        stateOfferId = state.get("activeOfferId")
-        if stateOfferId:
-            activeOffer = getOfferByIdRecord(int(stateOfferId))
-            if activeOffer is not None:
-                return {
-                    "internshipOfferText": activeOffer.offerText,
-                    "internshipOfferSource": activeOffer.offerSource,
-                    "activeOfferId": activeOffer.id,
-                    "status": "",
-                }
-
-        allMessages = list(state.get("messages") or [])
-        userText = extractLatestHumanText(allMessages)
-        latestUrl = extractLatestUrlFromHumanMessages(allMessages)
-
-        if not userText and not latestUrl:
-            activeOffer = getActiveOfferRecord()
-            if activeOffer is None:
-                return {
-                    "internshipOfferText": None,
-                    "internshipOfferSource": None,
-                    "activeOfferId": None,
-                    "status": "",
-                }
-            return {
-                "internshipOfferText": activeOffer.offerText,
-                "internshipOfferSource": activeOffer.offerSource,
-                "activeOfferId": activeOffer.id,
-                "status": "",
-            }
-
-        intakeText = userText
-        if latestUrl and latestUrl not in intakeText:
-            intakeText = f"{intakeText}\n\nPreviously shared offer URL: {latestUrl}".strip(
-            )
-
-        result = invokeStructuredAgent(
-            offerIntakeAgent,
-            {"messages": [HumanMessage(content=intakeText)]},
-            config,
-            recursionLimit=AGENT_RECURSION_LIMIT,
-        )
-        intakeOutput = extractStructuredOutput(result)
-
-        if not intakeOutput:
-            internshipOfferText = None
-            internshipOfferSource = None
-            activeOfferId = None
-        else:
-            hasOffer = bool(intakeOutput.get("hasOffer", False))
-            internshipOfferText = str(intakeOutput.get(
-                "offerText") or "").strip() if hasOffer else None
-            internshipOfferSource = str(intakeOutput.get(
-                "offerSource") or "").strip() if hasOffer else None
-            if not internshipOfferText:
-                internshipOfferText = None
-            if not internshipOfferSource:
-                internshipOfferSource = None
-            activeOfferId = None
-            if internshipOfferText:
-                dbOffer = saveOfferRecord(
-                    offerText=internshipOfferText,
-                    offerSource=internshipOfferSource,
-                )
-                activeOfferId = dbOffer.id
-            else:
-                activeOffer = getActiveOfferRecord()
-                if activeOffer is not None:
-                    internshipOfferText = activeOffer.offerText
-                    internshipOfferSource = activeOffer.offerSource
-                    activeOfferId = activeOffer.id
-
-        return {
-            "internshipOfferText": internshipOfferText,
-            "internshipOfferSource": internshipOfferSource,
-            "activeOfferId": activeOfferId,
-            "status": "",
-        }
-    except Exception as exc:
-        return {
-            "messages": [AIMessage(content=formatLlmError(exc))],
-            "internshipOfferText": None,
-            "internshipOfferSource": None,
-            "activeOfferId": None,
-            "status": "",
-        }
 
 
 def agentNodeQuestionAsker(state: CoverLetterState, config: dict) -> dict:
@@ -429,14 +289,9 @@ def agentNodePdfGenerator(state: CoverLetterState) -> dict:
 
 
 def buildGraph() -> StateGraph:
-    def routeAfterOfferIntake(state: CoverLetterState) -> str:
-        if state.get("internshipOfferText"):
-            return "writer"
-        if bool(state.get("questionAskerHasRun", False)):
-            return "writer"
-        return "questionAsker"
-
     def routeAfterQuestionAsker(state: CoverLetterState) -> str:
+        if bool(state.get("questionAskerHasRun", False)) and len(state.get("messages", [])) > 1:
+            return "coverLetterWriter"
         return "human"
 
     def routeAfterCoverLetterWriter(state: CoverLetterState) -> str:
@@ -446,8 +301,6 @@ def buildGraph() -> StateGraph:
         return "human"
 
     graph = StateGraph(CoverLetterState)
-    graph.add_node("agentNodeOfferIntake", lambda state,
-                   config: agentNodeOfferIntake(state, config))
     graph.add_node("agentNodeQuestionAsker", lambda state,
                    config: agentNodeQuestionAsker(state, config))
     graph.add_node("agentNodeCoverLetterWriter", lambda state,
@@ -456,20 +309,13 @@ def buildGraph() -> StateGraph:
                    config: edgeNodeCoverLetterWriterToPdfGenerator(state))
     graph.add_node("agentNodePdfGenerator", lambda state,
                    config: agentNodePdfGenerator(state))
-    graph.add_edge(START, "agentNodeOfferIntake")
-    graph.add_conditional_edges(
-        "agentNodeOfferIntake",
-        routeAfterOfferIntake,
-        {
-            "questionAsker": "agentNodeQuestionAsker",
-            "writer": "agentNodeCoverLetterWriter",
-        },
-    )
+    graph.add_edge(START, "agentNodeQuestionAsker")
     graph.add_conditional_edges(
         "agentNodeQuestionAsker",
         routeAfterQuestionAsker,
         {
             "human": END,
+            "coverLetterWriter": "agentNodeCoverLetterWriter",
         },
     )
     graph.add_conditional_edges(

@@ -35,11 +35,6 @@ def runGraph(graph, initial_state: dict, agentName: str = "Assistant", firstQues
     lastPrintedText = ""
 
     history = list(initial_state.get("messages", []))
-    persistentState = {
-        key: value
-        for key, value in initial_state.items()
-        if key != "messages" and key.endswith("HasRun") and isinstance(value, bool)
-    }
     seenMessageIds = {
         getattr(message, "id", None)
         for message in history
@@ -318,47 +313,58 @@ def runGraph(graph, initial_state: dict, agentName: str = "Assistant", firstQues
         history.append(userMessage)
         setStatus("Thinking...")
 
-        streamInput = {"messages": history}
-        streamInput.update(persistentState)
+        streamInput = dict(initial_state)
+        streamInput["messages"] = history
 
-        for event in graph.stream(streamInput, stream_mode="updates", subgraphs=True):
-            parentNodeName = None
-            if isinstance(event, tuple) and len(event) == 2:
-                path, updates = event
-                if isinstance(path, tuple) and len(path) > 0:
-                    lastPathItem = path[-1]
-                    if isinstance(lastPathItem, str) and lastPathItem:
-                        parentNodeName = lastPathItem.split(":", 1)[0]
-            else:
-                updates = event
+        try:
+            for event in graph.stream(streamInput, stream_mode="updates", subgraphs=True):
+                parentNodeName = None
+                if isinstance(event, tuple) and len(event) == 2:
+                    path, updates = event
+                    if isinstance(path, tuple) and len(path) > 0:
+                        lastPathItem = path[-1]
+                        if isinstance(lastPathItem, str) and lastPathItem:
+                            parentNodeName = lastPathItem.split(":", 1)[0]
+                else:
+                    updates = event
 
-            if updates:
-                nodeName = next(iter(updates))
-                nodeData = updates[nodeName]
-                for key, value in nodeData.items():
-                    if key == "messages":
-                        continue
-                    if key.endswith("HasRun") and isinstance(value, bool):
-                        persistentState[key] = value
+                if updates:
+                    nodeName = next(iter(updates))
+                    nodeData = updates[nodeName]
+                    for key, value in nodeData.items():
+                        if key == "messages":
+                            continue
+                        initial_state[key] = value
 
-            newMessages = processUpdates(
-                updates, parentNodeName=parentNodeName)
-            if not newMessages:
-                continue
-            for message in newMessages:
-                messageId = getattr(message, "id", None)
-                if messageId:
-                    if messageId in seenMessageIds:
-                        continue
-                    seenMessageIds.add(messageId)
-                history.append(message)
+                newMessages = processUpdates(
+                    updates, parentNodeName=parentNodeName)
+                if not newMessages:
+                    continue
+                for message in newMessages:
+                    messageId = getattr(message, "id", None)
+                    if messageId:
+                        if messageId in seenMessageIds:
+                            continue
+                        seenMessageIds.add(messageId)
+                    history.append(message)
+        except Exception as exc:
+            clearStatus()
+            from llmUtils import formatLlmError
+            errorMsg = formatLlmError(exc)
+            console.print(
+                f"[bold red]Graph execution error:[/bold red] {errorMsg}")
+            history.append(AIMessage(
+                content=f"An error occurred while processing your request: {errorMsg}"))
+
+        initial_state["messages"] = history
+
         clearStatus()
         return True
 
     if firstQuestion and firstQuestion.strip():
         if not processQuestion(firstQuestion):
             clearStatus()
-            return
+            return history
 
     if allowUserInput:
         while True:
@@ -374,6 +380,7 @@ def runGraph(graph, initial_state: dict, agentName: str = "Assistant", firstQues
                 break
 
     clearStatus()
+    return history
 
 
 def drawGraph(graph):
