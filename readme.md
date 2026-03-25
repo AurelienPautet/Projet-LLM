@@ -65,7 +65,7 @@ The application generates professional PDFs using `pdflatex`. You must install a
 #### macOS (MacTeX via Homebrew)
 
 ```bash
-brew install --cask mactex
+brew install --cask basictex
 # Add TeX to PATH (may require restarting the terminal)
 sudo tlmgr update --self
 sudo tlmgr install moderncv fontawesome5
