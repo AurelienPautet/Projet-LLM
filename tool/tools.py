@@ -338,7 +338,6 @@ def saveOffer(offerText: str, offerSource: str = "") -> str:
         return f"Error: saveOffer failed: {exc}"
 
 
-@tool
 def getOfferById(offerId: int) -> Optional[Offer]:
     """Get one offer by id from database."""
     try:

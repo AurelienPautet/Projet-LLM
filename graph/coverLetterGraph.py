@@ -171,7 +171,7 @@ def agentNodeQuestion_Asker(state: CoverLetterState, config: RunnableConfig) -> 
 
 def agentNodeCover_Letter_Writer(state: CoverLetterState, config: RunnableConfig) -> dict:
     try:
-        inputMessages = list(state["messages"])
+        inputMessages = list(state["messages"][:1])
         internshipOfferText = str(state.get("internshipOfferText") or "").strip()
         internshipOfferSource = str(state.get("internshipOfferSource") or "").strip()
         if internshipOfferText:

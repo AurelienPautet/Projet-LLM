@@ -273,7 +273,8 @@ def runGraph(graph, initial_state: dict, agentName: str = "Assistant", firstQues
                         elif getattr(lastAi, "tool_calls", None):
                             printToolCalls(lastAi)
 
-        if showStructuredOutput:
+        isAgentNode = "agentNode" in effectiveNodeName or effectiveNodeName in ("agent", "model")
+        if showStructuredOutput and isAgentNode:
             if DEBUG:
                 printStructuredOutput(
                     effectiveNodeName, structuredResponse, parentNodeName)

@@ -139,7 +139,7 @@ def appendToLastMessage(messages: list, extra: str) -> list:
 
 def agentNodeCV_Writer(state: CVState, config: RunnableConfig) -> dict:
     try:
-        writerMessages = list(state["messages"])
+        writerMessages = list(state["messages"][:1])
         internshipOfferText = str(state.get("internshipOfferText") or "").strip()
         internshipOfferSource = str(state.get("internshipOfferSource") or "").strip()
         if internshipOfferText:
@@ -219,10 +219,11 @@ def agentNodeATS_Reviewer(state: CVState, config: RunnableConfig) -> dict:
         internshipOfferSource = str(state.get("internshipOfferSource") or "").strip()
         if internshipOfferText:
             reviewerContextStr += buildOfferContext(internshipOfferText, internshipOfferSource, "Internship offer context is provided for ATS alignment analysis.")
-        inputMessages = [HumanMessage(content=reviewerContextStr)]
+        
+        formatted_messages = [{"role": "user", "content": reviewerContextStr}]
         result = invokeStructuredAgentWithEnforcedResponseTool(
             atsReviewerAgent,
-            inputMessages,
+            formatted_messages,
             config,
             "AtsReviewerResponse",
             recursionLimit=AGENT_RECURSION_LIMIT,
@@ -323,8 +324,6 @@ def buildGraph() -> StateGraph:
         if atsScore < 75:
             if iterationCount >= ATS_MAX_IMPROVEMENT_CYCLES:
                 return "pdfGenerator"
-            if previousAtsScore is not None and atsScore <= previousAtsScore:
-                return "supervisor"
             return "cvWriter"
         return "pdfGenerator"
 

@@ -1,5 +1,6 @@
 from dotenv import load_dotenv
 from langchain.agents import create_agent
+from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 from typing import Optional
 from tool.tools import fetchWebPageContent, saveOffer, getOfferById, searchOffers, getOfferBySource
@@ -7,7 +8,9 @@ from llmUtils import buildChatModel
 
 load_dotenv()
 
-TOOLS = [fetchWebPageContent, searchOffers, getOfferById, saveOffer, getOfferBySource]
+getOfferByIdTool = tool(getOfferById)
+
+TOOLS = [fetchWebPageContent, searchOffers, getOfferByIdTool, saveOffer, getOfferBySource]
 
 
 class OfferResolutionResponse(BaseModel):
