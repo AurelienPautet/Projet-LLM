@@ -7,7 +7,6 @@ from sqlmodel import SQLModel, Field, ARRAY, String, create_engine, text
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import Column
 
-
 load_dotenv()
 EMBEDDING_DIM = int(os.getenv("EMBEDDING_DIM", "4096"))
 
@@ -36,6 +35,8 @@ class ExperienceBase(SQLModel):
     location: Optional[str] = Field(
         description="the location of the experience, e.g., 'Paris, France'")
 
+
+class Experience(ExperienceBase, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     embedding: Optional[List[float]] = Field(
         default=None, sa_column=Column(Vector(EMBEDDING_DIM)))
@@ -65,6 +66,8 @@ class OfferBase(SQLModel):
     coverLetterVersion: int = Field(
         default=0, description="current version of the generated cover letter")
 
+
+class Offer(OfferBase, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     embedding: Optional[List[float]] = Field(
         default=None, sa_column=Column(Vector(EMBEDDING_DIM)))

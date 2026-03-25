@@ -67,7 +67,7 @@ AI_MODEL=deepseek/deepseek-v3.2
 AI_EMBEDDING_API_KEY=your_embedding_api_key
 AI_EMBEDDING_ENDPOINT=https://models.inference.ai.azure.com
 AI_EMBEDDING_MODEL=text-embedding-3-large
-EMBEDDING_DIM=4096  # Embedding vector size (e.g. 4096)
+EMBEDDING_DIM=4096  # If you change this, you must reset the database (see below)
 
 DATABASE_URL=postgresql+psycopg://postgres:postgres@localhost:5433/career-goat
 
@@ -100,6 +100,16 @@ sudo apt-get install texlive-full texlive-fonts-extra
 
 1. Download and install MiKTeX from [https://miktex.org/download](https://miktex.org/download)
 2. Open **MiKTeX Console → Packages** and install: `moderncv`, `fontawesome5`
+
+### ⚠️ Important: Changing EMBEDDING_DIM
+
+If you change the `EMBEDDING_DIM` value, you must reset and re-initialize the database. Run:
+
+```bash
+python -c "from db.db import resetDbAndTables; resetDbAndTables()"
+```
+
+Then re-import your data as needed.
 
 ### 7. Initialize the Database
 
