@@ -17,7 +17,7 @@ from sqlalchemy import cast
 from db.db import engine, Experience, ExperienceBase, PersonalInfo, Offer
 from graph.embedding import createEmbeddingFromText
 from llmUtils import schemaToEmbeddingText
-
+EMBEDDING_DIM = int(os.getenv("EMBEDDING_DIM", "4096"))
 
 
 def compileLatexToPdf(latexCode: str, outputName: str = "cv") -> str:
@@ -38,14 +38,16 @@ def compileLatexToPdf(latexCode: str, outputName: str = "cv") -> str:
             f.write(latexCode)
 
         run = subprocess.run(
-            [latexBinary, "-interaction=nonstopmode", "-halt-on-error", f"-output-directory={tempDir}", texPath],
+            [latexBinary, "-interaction=nonstopmode", "-halt-on-error",
+                f"-output-directory={tempDir}", texPath],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             timeout=30, check=False,
         )
 
         pdfPath = os.path.join(tempDir, f"{cleanName}.pdf")
         if run.returncode != 0 or not os.path.exists(pdfPath):
-            latexLog = run.stdout.decode("utf-8", errors="replace").strip() if run.stdout else "Unknown LaTeX compilation failure."
+            latexLog = run.stdout.decode(
+                "utf-8", errors="replace").strip() if run.stdout else "Unknown LaTeX compilation failure."
             if "File `moderncv.cls' not found" in latexLog:
                 return "Error: moderncv is not installed in your LaTeX distribution. Install moderncv and retry."
             if "File `fontawesome5.sty' not found" in latexLog:
@@ -55,8 +57,6 @@ def compileLatexToPdf(latexCode: str, outputName: str = "cv") -> str:
         finalPdfPath = os.path.join(outputDir, f"{cleanName}.pdf")
         shutil.copyfile(pdfPath, finalPdfPath)
         return f"PDF generated successfully: {finalPdfPath}"
-
-
 
 
 def formatOfferSummary(dbOffer: Offer) -> str:
@@ -130,9 +130,11 @@ def upsertPersonalInfo(fieldName: str, fieldValue: str) -> str:
         if not cleanValue:
             return "Error: fieldValue cannot be empty"
         with Session(engine) as session:
-            existing = session.exec(select(PersonalInfo).where(PersonalInfo.fieldName == cleanName)).first()
+            existing = session.exec(select(PersonalInfo).where(
+                PersonalInfo.fieldName == cleanName)).first()
             if existing is None:
-                session.add(PersonalInfo(fieldName=cleanName, fieldValue=cleanValue))
+                session.add(PersonalInfo(
+                    fieldName=cleanName, fieldValue=cleanValue))
                 session.commit()
                 return f"Personal info added: {cleanName}"
             existing.fieldValue = cleanValue
@@ -151,7 +153,8 @@ def getPersonalInfo(fieldName: str) -> str:
         if not cleanName:
             return "Error: fieldName cannot be empty"
         with Session(engine) as session:
-            info = session.exec(select(PersonalInfo).where(PersonalInfo.fieldName == cleanName)).first()
+            info = session.exec(select(PersonalInfo).where(
+                PersonalInfo.fieldName == cleanName)).first()
         if info is None:
             return f"No personal info found for field: {cleanName}"
         return f"{info.fieldName}: {info.fieldValue}"
@@ -180,7 +183,7 @@ def searchExperiences(query: str, limit: int = 5) -> str:
         with Session(engine) as session:
             results = session.exec(
                 select(Experience)
-                .order_by(Experience.embedding.op("<=>") (cast(queryEmbedding, Vector(4096))))
+                .order_by(Experience.embedding.op("<=>")(cast(queryEmbedding, Vector(EMBEDDING_DIM))))
                 .limit(limit)
             ).all()
         if not results:
@@ -204,7 +207,8 @@ def editExperience(id: int, experience: ExperienceBase) -> str:
                 return f"Error: no experience found with id={id}"
             for field, value in experience.model_dump().items():
                 setattr(dbExperience, field, value)
-            dbExperience.embedding = createEmbeddingFromText(schemaToEmbeddingText(experience))
+            dbExperience.embedding = createEmbeddingFromText(
+                schemaToEmbeddingText(experience))
             session.add(dbExperience)
             session.commit()
             session.refresh(dbExperience)
@@ -296,18 +300,21 @@ def fetchWebPageContent(url: str) -> str:
         parsed = urlparse(url.strip())
         if parsed.scheme not in {"http", "https"}:
             return "Error: URL must start with http:// or https://"
-        request = Request(parsed.geturl(), headers={"User-Agent": "Mozilla/5.0 (CareerCopilot/1.0)"})
+        request = Request(parsed.geturl(), headers={
+                          "User-Agent": "Mozilla/5.0 (CareerCopilot/1.0)"})
         with urlopen(request, timeout=20) as response:
             rawBytes = response.read()
             encoding = response.headers.get_content_charset() or "utf-8"
             html = rawBytes.decode(encoding, errors="replace")
-        content = re.sub(r"(?is)<(script|style|noscript).*?>.*?</\1>", " ", html)
+        content = re.sub(
+            r"(?is)<(script|style|noscript).*?>.*?</\1>", " ", html)
         content = re.sub(r"(?is)<[^>]+>", " ", content)
         content = re.sub(r"\s+", " ", content).strip()
         if not content:
             return "Error: no readable text content was found on this page."
         if len(content) > 6000:
-            content = content[:6000] + " ... [Content truncated to fit context limits]"
+            content = content[:6000] + \
+                " ... [Content truncated to fit context limits]"
         return content
     except Exception as exc:
         return f"Error: fetchWebPageContent failed: {exc}"
@@ -356,7 +363,7 @@ def searchOffers(query: str, limit: int = 5) -> str:
             results = session.exec(
                 select(Offer)
                 .where(Offer.embedding.is_not(None))
-                .order_by(Offer.embedding.op("<=>") (cast(queryEmbedding, Vector(4096))))
+                .order_by(Offer.embedding.op("<=>")(cast(queryEmbedding, Vector(EMBEDDING_DIM))))
                 .limit(limit)
             ).all()
         if not results:
@@ -374,7 +381,8 @@ def getOfferBySource(sourceUrl: str) -> str:
         if not cleanUrl:
             return "Error: sourceUrl cannot be empty"
         with Session(engine) as session:
-            dbOffer = session.exec(select(Offer).where(Offer.offerSource == cleanUrl)).first()
+            dbOffer = session.exec(select(Offer).where(
+                Offer.offerSource == cleanUrl)).first()
         if dbOffer is None:
             return f"No offer found with source code: {cleanUrl}"
         return formatOfferSummary(dbOffer)

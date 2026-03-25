@@ -56,7 +56,23 @@ This launches a container exposing PostgreSQL on port **5433** with:
 
 ### 5. Configure Environment Variables
 
-Edit `.env` and fill in your credentials:
+Edit `.env` and fill in your credentials. To change the embedding vector size, set `EMBEDDING_DIM` (default: 4096):
+
+```
+# Example .env
+AI_API_KEY=your_api_key
+AI_ENDPOINT=https://openrouter.ai/api/v1
+AI_MODEL=deepseek/deepseek-v3.2
+
+AI_EMBEDDING_API_KEY=your_embedding_api_key
+AI_EMBEDDING_ENDPOINT=https://models.inference.ai.azure.com
+AI_EMBEDDING_MODEL=text-embedding-3-large
+EMBEDDING_DIM=4096  # Embedding vector size (e.g. 4096)
+
+DATABASE_URL=postgresql+psycopg://postgres:postgres@localhost:5433/career-goat
+
+DEBUG=false
+```
 
 ### 6. Install LaTeX (Required for PDF Generation)
 
