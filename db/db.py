@@ -29,7 +29,7 @@ class ExperienceBase(SQLModel):
 
 class Experience(ExperienceBase, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
-    embedding: Optional[List[float]] = Field(default=None, sa_column=Column(Vector(3072)))
+    embedding: Optional[List[float]] = Field(default=None, sa_column=Column(Vector(4096)))
 
 
 class PersonalInfoBase(SQLModel):
@@ -52,7 +52,7 @@ class OfferBase(SQLModel):
 
 class Offer(OfferBase, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
-    embedding: Optional[List[float]] = Field(default=None, sa_column=Column(Vector(3072)))
+    embedding: Optional[List[float]] = Field(default=None, sa_column=Column(Vector(4096)))
     createdAt: datetime = Field(default_factory=datetime.utcnow)
     updatedAt: datetime = Field(default_factory=datetime.utcnow)
 

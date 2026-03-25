@@ -257,7 +257,7 @@ def edgeNodeCoverLetterWriterToPdfGenerator(state: CoverLetterState) -> dict:
 
 def buildGraph() -> StateGraph:
     def routeAfterQuestionAsker(state: CoverLetterState) -> str:
-        if bool(state.get("questionAskerHasRun", False)) and len(state.get("messages", [])) > 1:
+        if bool(state.get("questionAskerHasRun", False)) and len(state.get("messages", [])) > 1 and (state.get("status", "") == "Generating cover letter draft..."):
             return "coverLetterWriter"
         return "supervisor"
 

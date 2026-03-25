@@ -115,6 +115,7 @@ def runSelectedGraph(route: str, firstQuestion: str, offerId: Optional[int], sta
             states["cv"] = {"messages": [], "status": "", "activeOfferId": offerId}
         else:
             states["cv"]["activeOfferId"] = offerId
+            states["cv"]["atsIterationCount"] = 0
         return runGraph(cv_graph, states["cv"],
                         agentName="CV manager", firstQuestion=firstQuestion, allowUserInput=False)
     if route == "coverLetter":
@@ -129,9 +130,34 @@ def runSelectedGraph(route: str, firstQuestion: str, offerId: Optional[int], sta
 
 def main():
     createDbAndTables()
+    
+    welcome_content = """
+[bold cyan]>>[/bold cyan] [bold]Job Offers[/bold]
+   - Add an offer (text or URL)
+   - View/edit saved offers
+
+[bold cyan]>>[/bold cyan] [bold]Work Experience[/bold]
+   - Import a CV from a file
+   - Add/edit/delete experiences
+   - Manage personal information
+   - Search through experiences
+
+[bold cyan]>>[/bold cyan] [bold]CV / Resume[/bold]
+   - Generate a new CV
+   - Improve an existing CV
+   - Customize for a specific job offer
+
+[bold cyan]>>[/bold cyan] [bold]Cover Letter[/bold]
+   - Generate a cover letter
+   - Improve an existing cover letter
+   - Customize for a job offer
+    """
+    
     console.print(Rule(style="blue"))
-    console.print(Panel("[bold blue]Career Copilot[/bold blue]",
-                  border_style="blue", padding=(0, 4)))
+    console.print(Panel(welcome_content,
+                  title="[bold blue]Career Copilot - What I can do[/bold blue]",
+                  border_style="blue", 
+                  padding=(1, 2)))
     console.print(Rule(style="blue"))
 
     supervisor = buildSupervisor()
@@ -170,25 +196,25 @@ def main():
                 )
 
             if decision.route == "quit":
-                console.print("[bold blue]Supervisor:[/bold blue] Goodbye!")
+                console.print("\n[bold blue]Supervisor:[/bold blue] Goodbye!")
                 return
 
             if decision.route == "clarify":
                 console.print(
-                    f"[bold blue]Supervisor:[/bold blue] {decision.message}")
+                    f"\n[bold blue]Supervisor:[/bold blue] {decision.message}")
                 chatHistory.append(AIMessage(content=decision.message))
                 break
 
             if decision.route == "user":
                 if decision.message.strip():
                     console.print(
-                        f"[bold blue]Supervisor:[/bold blue] {decision.message}")
+                        f"\n[bold blue]Supervisor:[/bold blue] {decision.message}")
                     chatHistory.append(AIMessage(content=decision.message))
                 break
 
             if decision.message.strip():
                 console.print(
-                    f"[bold blue]Supervisor:[/bold blue] {decision.message}")
+                    f"\n[bold blue]Supervisor:[/bold blue] {decision.message}")
                 chatHistory.append(AIMessage(content=decision.message))
 
             previousRoute = decision.route

@@ -180,7 +180,7 @@ def searchExperiences(query: str, limit: int = 5) -> str:
         with Session(engine) as session:
             results = session.exec(
                 select(Experience)
-                .order_by(Experience.embedding.op("<=>") (cast(queryEmbedding, Vector(3072))))
+                .order_by(Experience.embedding.op("<=>") (cast(queryEmbedding, Vector(4096))))
                 .limit(limit)
             ).all()
         if not results:
@@ -357,7 +357,7 @@ def searchOffers(query: str, limit: int = 5) -> str:
             results = session.exec(
                 select(Offer)
                 .where(Offer.embedding.is_not(None))
-                .order_by(Offer.embedding.op("<=>") (cast(queryEmbedding, Vector(3072))))
+                .order_by(Offer.embedding.op("<=>") (cast(queryEmbedding, Vector(4096))))
                 .limit(limit)
             ).all()
         if not results:
