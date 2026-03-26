@@ -20,45 +20,6 @@ from llmUtils import schemaToEmbeddingText
 EMBEDDING_DIM = int(os.getenv("EMBEDDING_DIM", "4096"))
 
 
-def compileLatexToPdf(latexCode: str, outputName: str = "cv") -> str:
-    latexBinary = shutil.which("pdflatex")
-    if latexBinary is None:
-        return "Error: pdflatex is not installed or not available in PATH."
-
-    cleanName = re.sub(r"[^a-zA-Z0-9.-]", "-", outputName).strip(".-") or "cv"
-    if cleanName.lower().endswith(".pdf"):
-        cleanName = cleanName[:-4]
-
-    outputDir = os.path.abspath("generatedPdfs")
-    os.makedirs(outputDir, exist_ok=True)
-
-    with tempfile.TemporaryDirectory(prefix="latexBuild-") as tempDir:
-        texPath = os.path.join(tempDir, f"{cleanName}.tex")
-        with open(texPath, "w", encoding="utf-8") as f:
-            f.write(latexCode)
-
-        run = subprocess.run(
-            [latexBinary, "-interaction=nonstopmode", "-halt-on-error",
-                f"-output-directory={tempDir}", texPath],
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            timeout=30, check=False,
-        )
-
-        pdfPath = os.path.join(tempDir, f"{cleanName}.pdf")
-        if run.returncode != 0 or not os.path.exists(pdfPath):
-            latexLog = run.stdout.decode(
-                "utf-8", errors="replace").strip() if run.stdout else "Unknown LaTeX compilation failure."
-            if "File `moderncv.cls' not found" in latexLog:
-                return "Error: moderncv is not installed in your LaTeX distribution. Install moderncv and retry."
-            if "File `fontawesome5.sty' not found" in latexLog:
-                return "Error: fontawesome5 package is missing. Install it and retry."
-            return f"Error: LaTeX compilation failed.\n{latexLog}"
-
-        finalPdfPath = os.path.join(outputDir, f"{cleanName}.pdf")
-        shutil.copyfile(pdfPath, finalPdfPath)
-        return f"PDF generated successfully: {finalPdfPath}"
-
-
 def formatOfferSummary(dbOffer: Offer) -> str:
     source = dbOffer.offerSource or "N/A"
     cvLength = len(dbOffer.cvOutput or "")
@@ -388,3 +349,43 @@ def getOfferBySource(sourceUrl: str) -> str:
         return formatOfferSummary(dbOffer)
     except Exception as exc:
         return f"Error: getOfferBySource failed: {exc}"
+
+
+def compileLatexToPdf(latexCode: str, outputName: str = "cv") -> str:
+    latexBinary = shutil.which("pdflatex")
+    if latexBinary is None:
+        return "Error: pdflatex is not installed or not available in PATH."
+
+    cleanName = re.sub(r"[^a-zA-Z0-9.-]", "-", outputName).strip(".-") or "cv"
+    if cleanName.lower().endswith(".pdf"):
+        cleanName = cleanName[:-4]
+
+    outputDir = os.path.abspath("generatedPdfs")
+    os.makedirs(outputDir, exist_ok=True)
+
+    with tempfile.TemporaryDirectory(prefix="latexBuild-") as tempDir:
+        texPath = os.path.join(tempDir, f"{cleanName}.tex")
+        with open(texPath, "w", encoding="utf-8") as f:
+            f.write(latexCode)
+
+        run = subprocess.run(
+            [latexBinary, "-interaction=nonstopmode", "-halt-on-error",
+                f"-output-directory={tempDir}", texPath],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            timeout=30, check=False,
+        )
+
+        pdfPath = os.path.join(tempDir, f"{cleanName}.pdf")
+        if run.returncode != 0 or not os.path.exists(pdfPath):
+            latexLog = run.stdout.decode(
+                "utf-8", errors="replace").strip() if run.stdout else "Unknown LaTeX compilation failure."
+            if "File `moderncv.cls' not found" in latexLog:
+                return "Error: moderncv is not installed in your LaTeX distribution. Install moderncv and retry."
+            if "File `fontawesome5.sty' not found" in latexLog:
+                return "Error: fontawesome5 package is missing. Install it and retry."
+            return f"Error: LaTeX compilation failed.\n{latexLog}"
+
+        finalPdfPath = os.path.join(outputDir, f"{cleanName}.pdf")
+        shutil.copyfile(pdfPath, finalPdfPath)
+        return f"PDF generated successfully: {finalPdfPath}"
+

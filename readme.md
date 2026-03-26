@@ -101,7 +101,7 @@ sudo apt-get install texlive-full texlive-fonts-extra
 1. Download and install MiKTeX from [https://miktex.org/download](https://miktex.org/download)
 2. Open **MiKTeX Console → Packages** and install: `moderncv`, `fontawesome5`
 
-### ⚠️ Important: Changing EMBEDDING_DIM
+### Important: Changing EMBEDDING_DIM
 
 If you change the `EMBEDDING_DIM` value, you must reset and re-initialize the database. Run:
 

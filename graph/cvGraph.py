@@ -25,7 +25,6 @@ class CVState(BaseState):
     structured_response: Optional[dict] = None
     atsIterationCount: int = 0
     lastAtsScore: Optional[int] = None
-    previousAtsScore: Optional[int] = None
     internshipOfferText: Optional[str] = None
     internshipOfferSource: Optional[str] = None
     activeOfferId: Optional[int] = None
@@ -140,10 +139,13 @@ def appendToLastMessage(messages: list, extra: str) -> list:
 def agentNodeCV_Writer(state: CVState, config: RunnableConfig) -> dict:
     try:
         writerMessages = list(state["messages"][:1])
-        internshipOfferText = str(state.get("internshipOfferText") or "").strip()
-        internshipOfferSource = str(state.get("internshipOfferSource") or "").strip()
+        internshipOfferText = str(
+            state.get("internshipOfferText") or "").strip()
+        internshipOfferSource = str(
+            state.get("internshipOfferSource") or "").strip()
         if internshipOfferText:
-            offerStr = buildOfferContext(internshipOfferText, internshipOfferSource, "A job offer is provided below. Tailor the CV to this offer while staying truthful to known experiences.")
+            offerStr = buildOfferContext(internshipOfferText, internshipOfferSource,
+                                         "A job offer is provided below. Tailor the CV to this offer while staying truthful to known experiences.")
             writerMessages = appendToLastMessage(writerMessages, offerStr)
         reviewerOutput = state.get("reviewerOutput") or {}
         try:
@@ -159,7 +161,8 @@ def agentNodeCV_Writer(state: CVState, config: RunnableConfig) -> dict:
                 f"ATS reviewer output JSON:\n{json.dumps(reviewerOutput, ensure_ascii=True)}"
                 "\n[/ATS REVIEW FEEDBACK]"
             )
-            writerMessages = appendToLastMessage(writerMessages, revisionContext)
+            writerMessages = appendToLastMessage(
+                writerMessages, revisionContext)
         result = invokeStructuredAgentWithEnforcedResponseTool(
             cvWriterAgent,
             writerMessages,
@@ -211,15 +214,17 @@ def agentNodeATS_Reviewer(state: CVState, config: RunnableConfig) -> dict:
                 "structured_response": reviewerOutput,
                 "atsIterationCount": previousIterationCount,
                 "lastAtsScore": previousAtsScore,
-                "previousAtsScore": previousAtsScore,
                 "status": "",
             }
         reviewerContextStr = f"CV writer output JSON:\n{json.dumps(writerOutput, ensure_ascii=True)}"
-        internshipOfferText = str(state.get("internshipOfferText") or "").strip()
-        internshipOfferSource = str(state.get("internshipOfferSource") or "").strip()
+        internshipOfferText = str(
+            state.get("internshipOfferText") or "").strip()
+        internshipOfferSource = str(
+            state.get("internshipOfferSource") or "").strip()
         if internshipOfferText:
-            reviewerContextStr += buildOfferContext(internshipOfferText, internshipOfferSource, "Internship offer context is provided for ATS alignment analysis.")
-        
+            reviewerContextStr += buildOfferContext(internshipOfferText, internshipOfferSource,
+                                                    "Internship offer context is provided for ATS alignment analysis.")
+
         formatted_messages = [{"role": "user", "content": reviewerContextStr}]
         result = invokeStructuredAgentWithEnforcedResponseTool(
             atsReviewerAgent,
@@ -247,7 +252,6 @@ def agentNodeATS_Reviewer(state: CVState, config: RunnableConfig) -> dict:
             "structured_response": reviewerOutput,
             "atsIterationCount": previousIterationCount + 1,
             "lastAtsScore": currentAtsScore,
-            "previousAtsScore": previousAtsScore,
             "status": "",
         }
     except Exception as exc:
@@ -282,7 +286,8 @@ def agentNodePdf_Generator(state: CVState, config: RunnableConfig) -> dict:
             recursionLimit=PDF_AGENT_RECURSION_LIMIT,
         )
         msgs = result.get("messages", [])
-        message = str(msgs[-1].content or "").strip() if msgs and isinstance(msgs[-1], AIMessage) else ""
+        message = str(
+            msgs[-1].content or "").strip() if msgs and isinstance(msgs[-1], AIMessage) else ""
         message = message or "PDF generation failed."
         return {
             "messages": [AIMessage(content=message)],
@@ -290,6 +295,7 @@ def agentNodePdf_Generator(state: CVState, config: RunnableConfig) -> dict:
         }
     except Exception as exc:
         return handleNodeError(exc)
+
 
 def edgeNodeCvWriterToAtsReviewer(state: CVState) -> dict:
     return {"status": "Reviewing CV for ATS compatibility..."}
@@ -315,7 +321,6 @@ def buildGraph() -> StateGraph:
         messageText = str(reviewerOutput.get("message", "")).lower()
         if "could not produce a structured ats response" in messageText:
             return "supervisor"
-        previousAtsScore = state.get("previousAtsScore")
         iterationCount = int(state.get("atsIterationCount", 0) or 0)
         try:
             atsScore = int(reviewerOutput.get("ats", 0) or 0)
@@ -331,9 +336,12 @@ def buildGraph() -> StateGraph:
     graph.add_node("agentNodeLoad_Offer", agentNodeLoad_Offer)
     graph.add_node("agentNodeCV_Writer", agentNodeCV_Writer)
     graph.add_node("agentNodeATS_Reviewer", agentNodeATS_Reviewer)
-    graph.add_node("edgeNodeCvWriterToAtsReviewer", edgeNodeCvWriterToAtsReviewer)
-    graph.add_node("edgeNodeAtsReviewerToCvWriter", edgeNodeAtsReviewerToCvWriter)
-    graph.add_node("edgeNodeAtsReviewerToPdfGenerator", edgeNodeAtsReviewerToPdfGenerator)
+    graph.add_node("edgeNodeCvWriterToAtsReviewer",
+                   edgeNodeCvWriterToAtsReviewer)
+    graph.add_node("edgeNodeAtsReviewerToCvWriter",
+                   edgeNodeAtsReviewerToCvWriter)
+    graph.add_node("edgeNodeAtsReviewerToPdfGenerator",
+                   edgeNodeAtsReviewerToPdfGenerator)
     graph.add_node("agentNodePdf_Generator", agentNodePdf_Generator)
     graph.add_edge(START, "agentNodeLoad_Offer")
     graph.add_edge("agentNodeLoad_Offer", "agentNodeCV_Writer")
@@ -356,7 +364,8 @@ def buildGraph() -> StateGraph:
         },
     )
     graph.add_edge("edgeNodeAtsReviewerToCvWriter", "agentNodeCV_Writer")
-    graph.add_edge("edgeNodeAtsReviewerToPdfGenerator", "agentNodePdf_Generator")
+    graph.add_edge("edgeNodeAtsReviewerToPdfGenerator",
+                   "agentNodePdf_Generator")
     graph.add_edge("agentNodePdf_Generator", END)
     return graph.compile()
 
